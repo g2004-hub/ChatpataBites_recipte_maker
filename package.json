@@ -1,0 +1,14 @@
+{
+  "name": "receipt-maker",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Receipt maker with SMSGate review message support.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

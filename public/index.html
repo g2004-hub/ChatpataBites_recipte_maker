@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Receipt Maker</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <main class="app-shell">
+      <section class="workspace" aria-label="Receipt maker">
+        <div class="panel order-panel">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">Order desk</p>
+              <h1>Receipt Maker</h1>
+            </div>
+            <span id="smsStatus" class="status-pill">Checking SMS</span>
+          </div>
+
+          <form id="orderForm">
+            <div class="grid two">
+              <label>
+                Business name
+                <input id="businessName" name="businessName" type="text" required>
+              </label>
+              <label>
+                Business phone
+                <input id="businessPhone" name="businessPhone" type="tel">
+              </label>
+              <label>
+                Customer name
+                <input id="customerName" name="customerName" type="text" placeholder="Customer name" required>
+              </label>
+              <label>
+                Customer phone
+                <input id="customerPhone" name="customerPhone" type="tel" placeholder="+919876543210" required>
+              </label>
+              <label>
+                Receipt number
+                <input id="receiptNumber" name="receiptNumber" type="text" required>
+              </label>
+              <label>
+                Google review link
+                <input id="googleReviewLink" name="googleReviewLink" type="url" placeholder="https://g.page/r/.../review">
+              </label>
+            </div>
+
+            <div class="items-header">
+              <h2>Items</h2>
+              <button class="icon-button text-button" id="addItem" type="button" title="Add item">
+                <span aria-hidden="true">+</span>
+                Add item
+              </button>
+            </div>
+
+            <div class="items-table" role="table" aria-label="Order items">
+              <div class="items-row items-labels" role="row">
+                <span>Menu</span>
+                <span>Item</span>
+                <span>Qty</span>
+                <span>Price</span>
+                <span>Total</span>
+                <span></span>
+              </div>
+              <div id="itemsList"></div>
+            </div>
+
+            <div class="totals-box">
+              <label>
+                Discount
+                <input id="discount" name="discount" type="number" min="0" step="0.01" value="0">
+              </label>
+              <label>
+                Tax
+                <input id="tax" name="tax" type="number" min="0" step="0.01" value="0">
+              </label>
+              <div class="grand-total">
+                <span>Total</span>
+                <strong id="grandTotal">&#8377;0.00</strong>
+              </div>
+            </div>
+
+            <div id="messageBox" class="message-box" role="status" aria-live="polite" hidden></div>
+
+            <div class="actions">
+              <button type="submit">Update receipt</button>
+              <button type="button" id="printReceipt" class="secondary">Print</button>
+              <button type="button" id="sendReview" class="secondary">Send review SMS</button>
+              <button type="button" id="newOrder" class="secondary">New order</button>
+            </div>
+          </form>
+        </div>
+
+        <aside class="receipt-panel" aria-label="Receipt preview">
+          <div id="receiptPreview" class="receipt-paper"></div>
+        </aside>
+      </section>
+    </main>
+
+    <template id="itemTemplate">
+      <div class="items-row item-entry" role="row">
+        <select class="menu-select" aria-label="Menu item"></select>
+        <input class="item-name" type="text" placeholder="Custom item name" required>
+        <input class="item-qty" type="number" min="1" step="1" value="1" required>
+        <input class="item-price" type="number" min="0" step="0.01" value="0" required>
+        <span class="item-total">&#8377;0.00</span>
+        <button class="remove-item" type="button" title="Remove item">x</button>
+      </div>
+    </template>
+
+    <script src="/app.js?v=2"></script>
+  </body>
+</html>
