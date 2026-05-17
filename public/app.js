@@ -118,12 +118,9 @@ function addItemRow(item) {
     if (select.value) {
       name.value = select.value;
       price.value = "";
-      name.hidden = true;
     } else {
       name.value = "";
       price.value = 0;
-      name.hidden = false;
-      name.focus();
     }
     saveDraft();
     updateTotals();
@@ -155,11 +152,9 @@ function applyMenuSelection(row, itemName, itemPrice) {
   const matched = state.menu.find((item) => item === itemName);
 
   if (matched) {
-    select.value = matched.name;
-    name.hidden = true;
+    select.value = matched;
   } else {
     select.value = "";
-    name.hidden = false;
   }
 }
 

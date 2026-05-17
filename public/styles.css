@@ -159,10 +159,10 @@ select:focus {
 
 .items-row {
   display: grid;
-  grid-template-columns: minmax(150px, 0.9fr) minmax(160px, 1fr) 80px 110px 110px 40px;
+  grid-template-columns: minmax(220px, 1fr) 130px 90px 120px 40px;
   gap: 8px;
   align-items: center;
-  min-width: 760px;
+  min-width: 620px;
   padding: 7px 0;
 }
 
@@ -176,10 +176,6 @@ select:focus {
 
 .item-total {
   font-weight: 700;
-}
-
-.item-name[hidden] {
-  display: none;
 }
 
 .remove-item {
