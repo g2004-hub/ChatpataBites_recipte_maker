@@ -17,6 +17,8 @@ Then open `http://localhost:3000`.
 
 Admin order history is available at `http://localhost:3000/admin`.
 
+For permanent Railway storage, create a Supabase project, run `supabase-schema.sql` in the Supabase SQL editor, then add `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` to Railway environment variables. Without those values, the app uses local JSON files, which are not permanent on Railway.
+
 ## What you need to provide
 
 - Your shop name and phone number.

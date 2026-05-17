@@ -251,6 +251,48 @@ select:focus {
   color: var(--accent-dark);
 }
 
+.summary-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin: 18px 0;
+}
+
+.summary-card {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 14px;
+  display: grid;
+  gap: 4px;
+}
+
+.summary-card span {
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.summary-card strong {
+  font-size: 1.35rem;
+  color: var(--accent-dark);
+}
+
+.supplier-form {
+  display: grid;
+  gap: 14px;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  padding: 18px 0;
+  margin: 18px 0;
+}
+
+.admin-section-title {
+  margin-top: 22px;
+  margin-bottom: 10px;
+}
+
 button {
   min-height: 42px;
   border: 1px solid var(--accent);
@@ -394,6 +436,59 @@ button:disabled {
   .grand-total,
   .actions button {
     width: 100%;
+  }
+
+  .items-table {
+    overflow-x: visible;
+  }
+
+  .items-labels {
+    display: none;
+  }
+
+  .items-row {
+    min-width: 0;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+    border-bottom: 1px solid var(--line);
+    padding: 12px 0;
+  }
+
+  .item-entry .menu-select {
+    grid-column: 1 / -1;
+  }
+
+  .item-total {
+    align-self: center;
+    padding: 10px;
+    border-radius: 6px;
+    background: #edf6f3;
+  }
+
+  .remove-item {
+    width: 100%;
+  }
+
+  .summary-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 420px) {
+  h1 {
+    font-size: 1.6rem;
+  }
+
+  input,
+  select,
+  button {
+    min-height: 46px;
+  }
+
+  .receipt-meta,
+  .receipt-line,
+  .receipt-total-line {
+    font-size: 0.92rem;
   }
 }
 

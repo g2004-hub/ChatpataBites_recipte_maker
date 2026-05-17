@@ -80,10 +80,54 @@
             Admin password
             <input id="adminPassword" type="password" autocomplete="current-password" required>
           </label>
+          <label>
+            Month
+            <input id="reportMonth" type="month" required>
+          </label>
           <button type="submit">View orders</button>
         </form>
 
         <div id="messageBox" class="message-box" role="status" aria-live="polite" hidden></div>
+        <div id="summaryView" class="summary-grid"></div>
+
+        <form id="supplierForm" class="supplier-form" hidden>
+          <h2>Supplier Payment Record</h2>
+          <div class="grid two">
+            <label>
+              Supplier name
+              <input id="supplierName" type="text" placeholder="Who you bought from">
+            </label>
+            <label>
+              Date
+              <input id="transactionDate" type="date">
+            </label>
+            <label>
+              Total amount
+              <input id="totalAmount" type="number" min="0" step="0.01" value="0">
+            </label>
+            <label>
+              Paid amount
+              <input id="paidAmount" type="number" min="0" step="0.01" value="0">
+            </label>
+          </div>
+          <label>
+            Items / notes
+            <input id="itemDetails" type="text" placeholder="Example: chicken, eggs, masala">
+          </label>
+          <label>
+            Extra note
+            <input id="supplierNotes" type="text" placeholder="Paid full, baki, online, cash">
+          </label>
+          <button type="submit">Save supplier record</button>
+        </form>
+
+        <h2 class="admin-section-title">Daily Records</h2>
+        <div id="dailyView"></div>
+
+        <h2 class="admin-section-title">Supplier Records</h2>
+        <div id="supplierView"></div>
+
+        <h2 class="admin-section-title">Sell Records</h2>
         <div id="ordersView"></div>
       </section>
     </main>

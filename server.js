@@ -31,7 +31,8 @@ const server = http.createServer(async (req, res) => {
         businessPhone: process.env.BUSINESS_PHONE || "",
         currencySymbol: process.env.CURRENCY_SYMBOL || "\u20B9",
         googleReviewLink: process.env.GOOGLE_REVIEW_LINK || "",
-        smsConfigured: Boolean(process.env.SMSGATE_USERNAME && process.env.SMSGATE_PASSWORD)
+        smsConfigured: Boolean(process.env.SMSGATE_USERNAME && process.env.SMSGATE_PASSWORD),
+        storageMode: getSupabaseConfig().ok ? "supabase" : "local"
       });
     }
 
@@ -47,6 +48,15 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === "GET" && requestUrl.pathname === "/api/admin/orders") {
       return handleAdminOrders(requestUrl, res);
+    }
+
+    if (req.method === "GET" && requestUrl.pathname === "/api/admin/overview") {
+      return handleAdminOverview(requestUrl, res);
+    }
+
+    if (req.method === "POST" && requestUrl.pathname === "/api/admin/supplier-records") {
+      const body = await readJson(req);
+      return handleSaveSupplierRecord(body, res);
     }
 
     if (req.method !== "GET") {
@@ -175,13 +185,13 @@ function buildReviewMessage(details) {
   ].join(" ");
 }
 
-function handleSaveOrder(body, res) {
+async function handleSaveOrder(body, res) {
   const order = sanitizeOrder(body);
   if (!order.receiptNumber || !order.customerName || !order.customerPhone || !order.items.length) {
     return sendJson(res, 400, { error: "Order needs receipt number, customer, phone, and at least one item." });
   }
 
-  const orders = readOrders();
+  const orders = await readOrders();
   const existingIndex = orders.findIndex((entry) => entry.receiptNumber === order.receiptNumber);
   const now = new Date().toISOString();
 
@@ -191,19 +201,87 @@ function handleSaveOrder(body, res) {
     orders.unshift({ ...order, savedAt: now, updatedAt: now });
   }
 
-  writeOrders(orders);
+  await writeOrder(order, existingIndex >= 0);
   return sendJson(res, 200, { ok: true, count: orders.length });
 }
 
-function handleAdminOrders(requestUrl, res) {
-  const password = requestUrl.searchParams.get("password") || "";
-  const expected = process.env.ADMIN_PASSWORD || "ChatpataBites";
-
-  if (password !== expected) {
+async function handleAdminOrders(requestUrl, res) {
+  if (!isValidAdminRequest(requestUrl)) {
     return sendJson(res, 401, { error: "Invalid admin password." });
   }
 
-  return sendJson(res, 200, { orders: readOrders() });
+  return sendJson(res, 200, { orders: await readOrders() });
+}
+
+async function handleAdminOverview(requestUrl, res) {
+  if (!isValidAdminRequest(requestUrl)) {
+    return sendJson(res, 401, { error: "Invalid admin password." });
+  }
+
+  const month = requestUrl.searchParams.get("month") || new Date().toISOString().slice(0, 7);
+  const orders = await readOrders();
+  const supplierRecords = await readSupplierRecords();
+  const monthOrders = orders.filter((order) => getMonthKey(order.updatedAt || order.savedAt || order.createdAt) === month);
+  const monthSupplierRecords = supplierRecords.filter((record) => getMonthKey(record.transactionDate || record.createdAt) === month);
+
+  const dailyMap = new Map();
+  for (const order of monthOrders) {
+    const dateKey = getDateKey(order.updatedAt || order.savedAt || order.createdAt);
+    const row = dailyMap.get(dateKey) || { date: dateKey, sales: 0, supplierPaid: 0, supplierDue: 0, orders: 0 };
+    row.sales += Number(order.total || 0);
+    row.orders += 1;
+    dailyMap.set(dateKey, row);
+  }
+
+  for (const record of monthSupplierRecords) {
+    const dateKey = getDateKey(record.transactionDate || record.createdAt);
+    const row = dailyMap.get(dateKey) || { date: dateKey, sales: 0, supplierPaid: 0, supplierDue: 0, orders: 0 };
+    row.supplierPaid += Number(record.paidAmount || 0);
+    row.supplierDue += Number(record.dueAmount || 0);
+    dailyMap.set(dateKey, row);
+  }
+
+  const turnover = monthOrders.reduce((sum, order) => sum + Number(order.total || 0), 0);
+  const supplierPaid = monthSupplierRecords.reduce((sum, record) => sum + Number(record.paidAmount || 0), 0);
+  const supplierDue = monthSupplierRecords.reduce((sum, record) => sum + Number(record.dueAmount || 0), 0);
+
+  return sendJson(res, 200, {
+    month,
+    storageMode: getSupabaseConfig().ok ? "supabase" : "local",
+    summary: {
+      orders: monthOrders.length,
+      turnover,
+      supplierPaid,
+      supplierDue,
+      netAfterSupplierPaid: turnover - supplierPaid
+    },
+    daily: [...dailyMap.values()].sort((a, b) => b.date.localeCompare(a.date)),
+    orders: monthOrders,
+    supplierRecords: monthSupplierRecords
+  });
+}
+
+async function handleSaveSupplierRecord(body, res) {
+  if (!isValidAdminPassword(body.adminPassword)) {
+    return sendJson(res, 401, { error: "Invalid admin password." });
+  }
+
+  const record = sanitizeSupplierRecord(body);
+  if (!record.supplierName || !record.totalAmount) {
+    return sendJson(res, 400, { error: "Supplier name and total amount are required." });
+  }
+
+  await writeSupplierRecord(record);
+  return sendJson(res, 200, { ok: true, record });
+}
+
+function isValidAdminRequest(requestUrl) {
+  return isValidAdminPassword(requestUrl.searchParams.get("password") || "");
+}
+
+function isValidAdminPassword(password) {
+  const expected = process.env.ADMIN_PASSWORD || "ChatpataBites";
+  return password === expected;
 }
 
 function sanitizeOrder(body) {
@@ -229,21 +307,227 @@ function sanitizeOrder(body) {
   };
 }
 
-function readOrders() {
+function sanitizeSupplierRecord(body) {
+  const totalAmount = Number(body.totalAmount || 0);
+  const paidAmount = Number(body.paidAmount || 0);
+  const dueAmount = Math.max(totalAmount - paidAmount, 0);
+
+  return {
+    id: body.id || `supplier-${Date.now()}`,
+    supplierName: String(body.supplierName || "").trim(),
+    itemDetails: String(body.itemDetails || "").trim(),
+    totalAmount,
+    paidAmount,
+    dueAmount,
+    paymentStatus: dueAmount === 0 ? "paid" : paidAmount > 0 ? "partial" : "due",
+    transactionDate: String(body.transactionDate || new Date().toISOString().slice(0, 10)),
+    notes: String(body.notes || "").trim(),
+    createdAt: new Date().toISOString()
+  };
+}
+
+async function readOrders() {
+  const supabase = getSupabaseConfig();
+  if (supabase.ok) {
+    const rows = await supabaseRequest("/rest/v1/sales_orders?select=*&order=updated_at.desc");
+    return rows.map(mapSalesOrderFromDb);
+  }
+
   if (!fs.existsSync(ordersPath)) {
     return [];
   }
 
   try {
-    return JSON.parse(fs.readFileSync(ordersPath, "utf8"));
+    const parsed = JSON.parse(stripBom(fs.readFileSync(ordersPath, "utf8")));
+    return Array.isArray(parsed) ? parsed : [parsed];
   } catch {
     return [];
   }
 }
 
-function writeOrders(orders) {
+async function writeOrder(order, isUpdate) {
+  const supabase = getSupabaseConfig();
+  if (supabase.ok) {
+    const payload = mapSalesOrderToDb(order);
+    await supabaseRequest("/rest/v1/sales_orders?on_conflict=receipt_number", {
+      method: "POST",
+      headers: {
+        "Prefer": "resolution=merge-duplicates,return=minimal"
+      },
+      body: JSON.stringify(payload)
+    });
+    return;
+  }
+
+  const orders = await readOrders();
+  const existingIndex = orders.findIndex((entry) => entry.receiptNumber === order.receiptNumber);
+  const now = new Date().toISOString();
+  if (existingIndex >= 0 || isUpdate) {
+    orders[existingIndex] = { ...orders[existingIndex], ...order, updatedAt: now };
+  } else {
+    orders.unshift({ ...order, savedAt: now, updatedAt: now });
+  }
+  writeOrdersLocal(orders);
+}
+
+function writeOrdersLocal(orders) {
   fs.mkdirSync(dataDir, { recursive: true });
   fs.writeFileSync(ordersPath, JSON.stringify(orders, null, 2));
+}
+
+async function readSupplierRecords() {
+  const supabase = getSupabaseConfig();
+  if (supabase.ok) {
+    const rows = await supabaseRequest("/rest/v1/supplier_records?select=*&order=transaction_date.desc");
+    return rows.map(mapSupplierRecordFromDb);
+  }
+
+  const localPath = path.join(dataDir, "supplier-records.json");
+  if (!fs.existsSync(localPath)) {
+    return [];
+  }
+
+  try {
+    const parsed = JSON.parse(stripBom(fs.readFileSync(localPath, "utf8")));
+    return Array.isArray(parsed) ? parsed : [parsed];
+  } catch {
+    return [];
+  }
+}
+
+async function writeSupplierRecord(record) {
+  const supabase = getSupabaseConfig();
+  if (supabase.ok) {
+    await supabaseRequest("/rest/v1/supplier_records", {
+      method: "POST",
+      headers: { "Prefer": "return=minimal" },
+      body: JSON.stringify(mapSupplierRecordToDb(record))
+    });
+    return;
+  }
+
+  const localPath = path.join(dataDir, "supplier-records.json");
+  const records = await readSupplierRecords();
+  records.unshift(record);
+  fs.mkdirSync(dataDir, { recursive: true });
+  fs.writeFileSync(localPath, JSON.stringify(records, null, 2));
+}
+
+function getSupabaseConfig() {
+  const url = process.env.SUPABASE_URL;
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  return {
+    ok: Boolean(url && key),
+    url,
+    key
+  };
+}
+
+async function supabaseRequest(pathname, options = {}) {
+  const supabase = getSupabaseConfig();
+  const response = await fetch(`${supabase.url}${pathname}`, {
+    method: options.method || "GET",
+    headers: {
+      "apikey": supabase.key,
+      "Authorization": `Bearer ${supabase.key}`,
+      "Content-Type": "application/json",
+      ...(options.headers || {})
+    },
+    body: options.body
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Supabase request failed: ${response.status} ${text}`);
+  }
+
+  const text = await response.text();
+  return text ? JSON.parse(text) : null;
+}
+
+function mapSalesOrderToDb(order) {
+  const now = new Date().toISOString();
+  return {
+    receipt_number: order.receiptNumber,
+    business_name: order.businessName,
+    business_phone: order.businessPhone,
+    customer_name: order.customerName,
+    customer_phone: order.customerPhone,
+    google_review_link: order.googleReviewLink,
+    items: order.items,
+    subtotal: order.subtotal,
+    discount: order.discount,
+    tax: order.tax,
+    total: order.total,
+    created_label: order.createdAt,
+    updated_at: now
+  };
+}
+
+function mapSalesOrderFromDb(row) {
+  return {
+    receiptNumber: row.receipt_number,
+    businessName: row.business_name,
+    businessPhone: row.business_phone,
+    customerName: row.customer_name,
+    customerPhone: row.customer_phone,
+    googleReviewLink: row.google_review_link,
+    items: row.items || [],
+    subtotal: Number(row.subtotal || 0),
+    discount: Number(row.discount || 0),
+    tax: Number(row.tax || 0),
+    total: Number(row.total || 0),
+    createdAt: row.created_label || row.created_at,
+    savedAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+function mapSupplierRecordToDb(record) {
+  return {
+    supplier_name: record.supplierName,
+    item_details: record.itemDetails,
+    total_amount: record.totalAmount,
+    paid_amount: record.paidAmount,
+    due_amount: record.dueAmount,
+    payment_status: record.paymentStatus,
+    transaction_date: record.transactionDate,
+    notes: record.notes
+  };
+}
+
+function mapSupplierRecordFromDb(row) {
+  return {
+    id: row.id,
+    supplierName: row.supplier_name,
+    itemDetails: row.item_details,
+    totalAmount: Number(row.total_amount || 0),
+    paidAmount: Number(row.paid_amount || 0),
+    dueAmount: Number(row.due_amount || 0),
+    paymentStatus: row.payment_status,
+    transactionDate: row.transaction_date,
+    notes: row.notes || "",
+    createdAt: row.created_at
+  };
+}
+
+function getMonthKey(value) {
+  const date = parseDate(value);
+  return date.toISOString().slice(0, 7);
+}
+
+function getDateKey(value) {
+  const date = parseDate(value);
+  return date.toISOString().slice(0, 10);
+}
+
+function parseDate(value) {
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? new Date() : parsed;
+}
+
+function stripBom(value) {
+  return String(value || "").replace(/^\uFEFF/, "");
 }
 
 function getSmsConfig() {
