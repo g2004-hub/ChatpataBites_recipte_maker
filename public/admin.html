@@ -52,6 +52,48 @@
         padding-left: 18px;
       }
 
+      .small-button {
+        min-height: 34px;
+        padding: 0 10px;
+        font-size: 0.82rem;
+      }
+
+      .row-actions,
+      .form-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+
+      .compact-label {
+        gap: 5px;
+        margin-bottom: 8px;
+        font-size: 0.78rem;
+      }
+
+      textarea {
+        font: inherit;
+        width: 100%;
+        min-height: 100px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        padding: 10px 11px;
+        background: #ffffff;
+        color: var(--ink);
+        resize: vertical;
+      }
+
+      textarea:focus {
+        border-color: var(--accent);
+        outline: 3px solid rgba(20, 108, 95, 0.14);
+      }
+
+      .amount-edit-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(96px, 1fr));
+        gap: 8px;
+      }
+
       @media (max-width: 760px) {
         .admin-login {
           display: grid;
@@ -91,7 +133,7 @@
         <div id="summaryView" class="summary-grid"></div>
 
         <form id="supplierForm" class="supplier-form" hidden>
-          <h2>Supplier Payment Record</h2>
+          <h2 id="supplierFormTitle">Supplier Payment Record</h2>
           <div class="grid two">
             <label>
               Supplier name
@@ -118,7 +160,10 @@
             Extra note
             <input id="supplierNotes" type="text" placeholder="Paid full, baki, online, cash">
           </label>
-          <button type="submit">Save supplier record</button>
+          <div class="form-actions">
+            <button id="supplierSubmitButton" type="submit">Save supplier record</button>
+            <button id="cancelSupplierEdit" class="secondary" type="button" hidden>Cancel edit</button>
+          </div>
         </form>
 
         <h2 class="admin-section-title">Daily Records</h2>

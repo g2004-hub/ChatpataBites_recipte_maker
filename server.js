@@ -59,6 +59,18 @@ const server = http.createServer(async (req, res) => {
       return handleSaveSupplierRecord(body, res);
     }
 
+    if (req.method === "PUT" && requestUrl.pathname.startsWith("/api/admin/supplier-records/")) {
+      const body = await readJson(req);
+      const id = decodeURIComponent(requestUrl.pathname.replace("/api/admin/supplier-records/", ""));
+      return handleUpdateSupplierRecord(id, body, res);
+    }
+
+    if (req.method === "PUT" && requestUrl.pathname.startsWith("/api/admin/orders/")) {
+      const body = await readJson(req);
+      const receiptNumber = decodeURIComponent(requestUrl.pathname.replace("/api/admin/orders/", ""));
+      return handleUpdateAdminOrder(receiptNumber, body, res);
+    }
+
     if (req.method !== "GET") {
       return sendJson(res, 405, { error: "Method not allowed" });
     }
@@ -275,6 +287,57 @@ async function handleSaveSupplierRecord(body, res) {
   return sendJson(res, 200, { ok: true, record });
 }
 
+async function handleUpdateSupplierRecord(id, body, res) {
+  if (!isValidAdminPassword(body.adminPassword)) {
+    return sendJson(res, 401, { error: "Invalid admin password." });
+  }
+
+  const records = await readSupplierRecords();
+  const existing = records.find((entry) => String(entry.id) === String(id));
+  if (!existing) {
+    return sendJson(res, 404, { error: "Supplier record not found." });
+  }
+
+  const record = {
+    ...sanitizeSupplierRecord({ ...existing, ...body, id: existing.id }),
+    id: existing.id,
+    createdAt: existing.createdAt || new Date().toISOString()
+  };
+
+  if (!record.supplierName || !record.totalAmount) {
+    return sendJson(res, 400, { error: "Supplier name and total amount are required." });
+  }
+
+  await updateSupplierRecord(record);
+  return sendJson(res, 200, { ok: true, record });
+}
+
+async function handleUpdateAdminOrder(receiptNumber, body, res) {
+  if (!isValidAdminPassword(body.adminPassword)) {
+    return sendJson(res, 401, { error: "Invalid admin password." });
+  }
+
+  const orders = await readOrders();
+  const existing = orders.find((entry) => entry.receiptNumber === receiptNumber);
+  if (!existing) {
+    return sendJson(res, 404, { error: "Sell record not found." });
+  }
+
+  const order = sanitizeOrder({
+    ...existing,
+    ...body,
+    receiptNumber: existing.receiptNumber,
+    createdAt: existing.createdAt
+  });
+
+  if (!order.receiptNumber || !order.customerName || !order.customerPhone || !order.items.length) {
+    return sendJson(res, 400, { error: "Sell record needs customer, phone, and at least one item." });
+  }
+
+  await writeOrder(order, true);
+  return sendJson(res, 200, { ok: true, order });
+}
+
 function isValidAdminRequest(requestUrl) {
   return isValidAdminPassword(requestUrl.searchParams.get("password") || "");
 }
@@ -409,6 +472,28 @@ async function writeSupplierRecord(record) {
   const localPath = path.join(dataDir, "supplier-records.json");
   const records = await readSupplierRecords();
   records.unshift(record);
+  fs.mkdirSync(dataDir, { recursive: true });
+  fs.writeFileSync(localPath, JSON.stringify(records, null, 2));
+}
+
+async function updateSupplierRecord(record) {
+  const supabase = getSupabaseConfig();
+  if (supabase.ok) {
+    await supabaseRequest(`/rest/v1/supplier_records?id=eq.${encodeURIComponent(record.id)}`, {
+      method: "PATCH",
+      headers: { "Prefer": "return=minimal" },
+      body: JSON.stringify(mapSupplierRecordToDb(record))
+    });
+    return;
+  }
+
+  const localPath = path.join(dataDir, "supplier-records.json");
+  const records = await readSupplierRecords();
+  const index = records.findIndex((entry) => String(entry.id) === String(record.id));
+  if (index === -1) {
+    throw new Error("Supplier record not found.");
+  }
+  records[index] = { ...records[index], ...record };
   fs.mkdirSync(dataDir, { recursive: true });
   fs.writeFileSync(localPath, JSON.stringify(records, null, 2));
 }
