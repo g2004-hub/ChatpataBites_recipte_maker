@@ -1,14 +1,21 @@
 const http = require("node:http");
 const fs = require("node:fs");
 const path = require("node:path");
+const crypto = require("node:crypto");
 const { URL } = require("node:url");
+const QRCode = require("qrcode");
 
 loadEnvFile();
 
 const publicDir = path.join(__dirname, "public");
 const dataDir = path.join(__dirname, "data");
 const ordersPath = path.join(dataDir, "orders.json");
+const scheduledReviewsPath = path.join(dataDir, "scheduled-review-messages.json");
 const port = Number(process.env.PORT || 3000);
+const upiId = "8260586748@ybl";
+const reviewDelayMs = 10 * 60 * 1000;
+const reviewRetryDelayMs = 5 * 60 * 1000;
+const maxReviewAttempts = 3;
 
 const mimeTypes = {
   ".html": "text/html; charset=utf-8",
@@ -31,7 +38,7 @@ const server = http.createServer(async (req, res) => {
         businessPhone: process.env.BUSINESS_PHONE || "",
         currencySymbol: process.env.CURRENCY_SYMBOL || "\u20B9",
         googleReviewLink: process.env.GOOGLE_REVIEW_LINK || "",
-        smsConfigured: Boolean(process.env.SMSGATE_USERNAME && process.env.SMSGATE_PASSWORD),
+        smsConfigured: getSmsConfig().ok,
         storageMode: getSupabaseConfig().ok ? "supabase" : "local"
       });
     }
@@ -41,9 +48,23 @@ const server = http.createServer(async (req, res) => {
       return handleSendReview(body, res);
     }
 
+    if (req.method === "POST" && requestUrl.pathname === "/api/send-bill") {
+      const body = await readJson(req);
+      return handleSendBill(body, req, res);
+    }
+
+    if (req.method === "POST" && requestUrl.pathname === "/api/bill-link") {
+      const body = await readJson(req);
+      return handleCreateBillLink(body, req, res);
+    }
+
     if (req.method === "POST" && requestUrl.pathname === "/api/orders") {
       const body = await readJson(req);
       return handleSaveOrder(body, res);
+    }
+
+    if (req.method === "GET" && requestUrl.pathname.startsWith("/api/bills/")) {
+      return handlePublicBillRequest(requestUrl, res);
     }
 
     if (req.method === "GET" && requestUrl.pathname === "/api/admin/orders") {
@@ -75,6 +96,10 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 405, { error: "Method not allowed" });
     }
 
+    if (requestUrl.pathname.startsWith("/bill/")) {
+      return serveStatic("/bill.html", res);
+    }
+
     return serveStatic(requestUrl.pathname, res);
   } catch (error) {
     console.error(error);
@@ -84,6 +109,15 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(port, () => {
   console.log(`Receipt maker running at http://localhost:${port}`);
+});
+
+setInterval(() => {
+  processScheduledReviews().catch((error) => {
+    console.error("Scheduled review worker failed:", error);
+  });
+}, 60 * 1000);
+processScheduledReviews().catch((error) => {
+  console.error("Scheduled review worker failed:", error);
 });
 
 async function handleSendReview(body, res) {
@@ -121,71 +155,21 @@ async function handleSendReview(body, res) {
     googleReviewLink
   });
 
-  const smsPayload = {
-    textMessage: { text: message },
-    phoneNumbers: [normalizedPhone],
-    simNumber: smsConfig.simNumber,
-    ttl: 3600,
-    priority: smsConfig.priority
-  };
-
-  if (smsConfig.deviceId) {
-    smsPayload.deviceId = smsConfig.deviceId;
-  }
-
-  const apiUrl = new URL(smsConfig.baseUrl);
-  if (smsConfig.skipPhoneValidation) {
-    apiUrl.searchParams.set("skipPhoneValidation", "true");
-  }
-  if (smsConfig.deviceActiveWithin) {
-    apiUrl.searchParams.set("deviceActiveWithin", String(smsConfig.deviceActiveWithin));
-  }
-
-  const response = await fetch(apiUrl, {
-    method: "POST",
-    headers: {
-      "Authorization": `Basic ${Buffer.from(`${smsConfig.username}:${smsConfig.password}`).toString("base64")}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify(smsPayload)
-  });
-
-  const responseText = await response.text();
-  let responseBody = responseText;
   try {
-    responseBody = JSON.parse(responseText);
-  } catch {
-    // Some gateways return plain text. Keep it as-is for troubleshooting.
-  }
-
-  if (!response.ok) {
-    const errorReport = {
-      status: response.status,
-      statusText: response.statusText,
-      response: responseBody,
-      sentPayload: {
-        textMessage: smsPayload.textMessage,
-        phoneNumbers: smsPayload.phoneNumbers,
-        deviceId: smsPayload.deviceId,
-        simNumber: smsPayload.simNumber,
-        ttl: smsPayload.ttl,
-        priority: smsPayload.priority
-      }
-    };
-    writeSmsErrorLog(errorReport);
-
-    return sendJson(res, response.status, {
-      error: "SMSGate rejected the message.",
-      details: errorReport
+    const result = await sendSms(normalizedPhone, message, smsConfig);
+    return sendJson(res, 200, {
+      ok: true,
+      message,
+      phoneNumber: normalizedPhone,
+      gatewayResponse: result.gatewayResponse
+    });
+  } catch (error) {
+    writeSmsErrorLog(error.details || { error: error.message });
+    return sendJson(res, error.status || 500, {
+      error: error.message || "SMSGate rejected the message.",
+      details: error.details
     });
   }
-
-  return sendJson(res, 200, {
-    ok: true,
-    message,
-    phoneNumber: normalizedPhone,
-    gatewayResponse: responseBody
-  });
 }
 
 function buildReviewMessage(details) {
@@ -197,24 +181,114 @@ function buildReviewMessage(details) {
   ].join(" ");
 }
 
+async function handleSendBill(body, req, res) {
+  const order = sanitizeOrder(body);
+  const validationError = validateBillOrder(order);
+  if (validationError) {
+    return sendJson(res, 400, { error: validationError });
+  }
+
+  const googleReviewLink = order.googleReviewLink || process.env.GOOGLE_REVIEW_LINK || "";
+  if (!googleReviewLink) {
+    return sendJson(res, 400, { error: "Google review link is required before sending the bill." });
+  }
+
+  const smsConfig = getSmsConfig();
+  if (!smsConfig.ok) {
+    return sendJson(res, 400, { error: smsConfig.error });
+  }
+
+  const normalizedPhone = normalizePhoneNumber(order.customerPhone);
+  if (!normalizedPhone) {
+    return sendJson(res, 400, {
+      error: "Customer phone number is invalid. Use a 10 digit Indian number or +91 format."
+    });
+  }
+
+  await saveOrderRecord(order);
+  const billUrl = buildBillUrl(req, order.receiptNumber);
+  const message = buildBillMessage(order, billUrl);
+
+  try {
+    const smsResult = await sendSms(normalizedPhone, message, smsConfig);
+    const scheduledAt = new Date(Date.now() + reviewDelayMs).toISOString();
+    await scheduleReviewMessage({
+      receiptNumber: order.receiptNumber,
+      customerName: order.customerName,
+      customerPhone: normalizedPhone,
+      businessName: order.businessName || process.env.BUSINESS_NAME || "Chatpata Bites",
+      businessPhone: order.businessPhone || process.env.BUSINESS_PHONE || "",
+      googleReviewLink,
+      scheduledAt
+    });
+
+    return sendJson(res, 200, {
+      ok: true,
+      billUrl,
+      phoneNumber: normalizedPhone,
+      reviewScheduledAt: scheduledAt,
+      gatewayResponse: smsResult.gatewayResponse
+    });
+  } catch (error) {
+    writeSmsErrorLog(error.details || { error: error.message });
+    return sendJson(res, error.status || 500, {
+      error: error.message || "Could not send bill SMS.",
+      details: error.details
+    });
+  }
+}
+
+async function handleCreateBillLink(body, req, res) {
+  const order = sanitizeOrder(body);
+  const validationError = validateBillOrder(order);
+  if (validationError) {
+    return sendJson(res, 400, { error: validationError });
+  }
+
+  await saveOrderRecord(order);
+  const billUrl = buildBillUrl(req, order.receiptNumber);
+  return sendJson(res, 200, {
+    ok: true,
+    billUrl,
+    whatsappUrl: buildWhatsAppUrl(order, billUrl)
+  });
+}
+
+async function handlePublicBillRequest(requestUrl, res) {
+  const parts = requestUrl.pathname.split("/").filter(Boolean);
+  const receiptNumber = decodeURIComponent(parts[2] || "");
+  const token = requestUrl.searchParams.get("token") || "";
+
+  if (!receiptNumber || !isValidBillToken(receiptNumber, token)) {
+    return sendJson(res, 404, { error: "Invalid or expired bill link." });
+  }
+
+  const order = await findOrderByReceipt(receiptNumber);
+  if (!order) {
+    return sendJson(res, 404, { error: "Bill not found." });
+  }
+
+  if (parts[3] === "qr") {
+    return sendBillQr(res, order);
+  }
+
+  return sendJson(res, 200, {
+    order: publicOrder(order),
+    upi: {
+      id: upiId,
+      payUrl: buildUpiUrl(order)
+    }
+  });
+}
+
 async function handleSaveOrder(body, res) {
   const order = sanitizeOrder(body);
   if (!order.receiptNumber || !order.customerName || !order.customerPhone || !order.items.length) {
     return sendJson(res, 400, { error: "Order needs receipt number, customer, phone, and at least one item." });
   }
 
-  const orders = await readOrders();
-  const existingIndex = orders.findIndex((entry) => entry.receiptNumber === order.receiptNumber);
-  const now = new Date().toISOString();
-
-  if (existingIndex >= 0) {
-    orders[existingIndex] = { ...orders[existingIndex], ...order, updatedAt: now };
-  } else {
-    orders.unshift({ ...order, savedAt: now, updatedAt: now });
-  }
-
-  await writeOrder(order, existingIndex >= 0);
-  return sendJson(res, 200, { ok: true, count: orders.length });
+  const result = await saveOrderRecord(order);
+  return sendJson(res, 200, { ok: true, count: result.count });
 }
 
 async function handleAdminOrders(requestUrl, res) {
@@ -389,6 +463,31 @@ function sanitizeSupplierRecord(body) {
   };
 }
 
+function validateBillOrder(order) {
+  if (!order.receiptNumber) {
+    return "Receipt number is required.";
+  }
+  if (!order.customerName || !order.customerPhone) {
+    return "Customer name and phone are required.";
+  }
+  if (!order.items.length) {
+    return "Add at least one item before sending the bill.";
+  }
+  return "";
+}
+
+async function saveOrderRecord(order) {
+  const orders = await readOrders();
+  const existingIndex = orders.findIndex((entry) => entry.receiptNumber === order.receiptNumber);
+  await writeOrder(order, existingIndex >= 0);
+  return { count: existingIndex >= 0 ? orders.length : orders.length + 1 };
+}
+
+async function findOrderByReceipt(receiptNumber) {
+  const orders = await readOrders();
+  return orders.find((entry) => entry.receiptNumber === receiptNumber);
+}
+
 async function readOrders() {
   const supabase = getSupabaseConfig();
   if (supabase.ok) {
@@ -499,8 +598,8 @@ async function updateSupplierRecord(record) {
 }
 
 function getSupabaseConfig() {
-  const url = process.env.SUPABASE_URL;
-  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  const url = String(process.env.SUPABASE_URL || "").trim();
+  const key = String(process.env.SUPABASE_SERVICE_ROLE_KEY || "").trim();
   return {
     ok: Boolean(url && key),
     url,
@@ -528,6 +627,185 @@ async function supabaseRequest(pathname, options = {}) {
 
   const text = await response.text();
   return text ? JSON.parse(text) : null;
+}
+
+async function sendSms(phoneNumber, message, smsConfig = getSmsConfig()) {
+  if (!smsConfig.ok) {
+    throw new Error(smsConfig.error);
+  }
+
+  const normalizedPhone = normalizePhoneNumber(phoneNumber);
+  if (!normalizedPhone) {
+    throw new Error("Customer phone number is invalid. Use a 10 digit Indian number or +91 format.");
+  }
+
+  const smsPayload = {
+    textMessage: { text: message },
+    phoneNumbers: [normalizedPhone],
+    simNumber: smsConfig.simNumber,
+    ttl: 3600,
+    priority: smsConfig.priority
+  };
+
+  if (smsConfig.deviceId) {
+    smsPayload.deviceId = smsConfig.deviceId;
+  }
+
+  const apiUrl = new URL(smsConfig.baseUrl);
+  if (smsConfig.skipPhoneValidation) {
+    apiUrl.searchParams.set("skipPhoneValidation", "true");
+  }
+  if (smsConfig.deviceActiveWithin) {
+    apiUrl.searchParams.set("deviceActiveWithin", String(smsConfig.deviceActiveWithin));
+  }
+
+  const response = await fetch(apiUrl, {
+    method: "POST",
+    headers: {
+      "Authorization": `Basic ${Buffer.from(`${smsConfig.username}:${smsConfig.password}`).toString("base64")}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(smsPayload)
+  });
+
+  const responseText = await response.text();
+  let responseBody = responseText;
+  try {
+    responseBody = JSON.parse(responseText);
+  } catch {
+    // Some gateways return plain text. Keep it as-is for troubleshooting.
+  }
+
+  if (!response.ok) {
+    const error = new Error("SMSGate rejected the message.");
+    error.status = response.status;
+    error.details = {
+      status: response.status,
+      statusText: response.statusText,
+      response: responseBody,
+      sentPayload: {
+        textMessage: smsPayload.textMessage,
+        phoneNumbers: smsPayload.phoneNumbers,
+        deviceId: smsPayload.deviceId,
+        simNumber: smsPayload.simNumber,
+        ttl: smsPayload.ttl,
+        priority: smsPayload.priority
+      }
+    };
+    throw error;
+  }
+
+  return {
+    phoneNumber: normalizedPhone,
+    gatewayResponse: responseBody
+  };
+}
+
+function buildBillMessage(order, billUrl) {
+  return [
+    `Hi ${order.customerName}, your Chatpata Bites bill is ready.`,
+    `Receipt ${order.receiptNumber}: ${process.env.CURRENCY_SYMBOL || "\u20B9"}${Number(order.total).toFixed(2)}.`,
+    `View and pay here: ${billUrl}`,
+    `For any query contact ${order.businessPhone || process.env.BUSINESS_PHONE || "us"}.`
+  ].join(" ");
+}
+
+function buildDelayedReviewMessage(message) {
+  return [
+    `Hi ${message.customerName}, how was the food at Chatpata Bites?`,
+    `Please give your review here: ${message.googleReviewLink}.`,
+    `For any query contact ${message.businessPhone || process.env.BUSINESS_PHONE || "us"}.`
+  ].join(" ");
+}
+
+function buildBillUrl(req, receiptNumber) {
+  const baseUrl = getPublicBaseUrl(req);
+  return `${baseUrl}/bill/${encodeURIComponent(receiptNumber)}/${createBillToken(receiptNumber)}`;
+}
+
+function getPublicBaseUrl(req) {
+  const configuredUrl = process.env.PUBLIC_BASE_URL || process.env.BILL_BASE_URL;
+  if (configuredUrl) {
+    return configuredUrl.replace(/\/$/, "");
+  }
+
+  const protocol = req.headers["x-forwarded-proto"] || "http";
+  const host = req.headers["x-forwarded-host"] || req.headers.host;
+  return `${protocol}://${host}`;
+}
+
+function createBillToken(receiptNumber) {
+  return crypto
+    .createHmac("sha256", getBillSecret())
+    .update(String(receiptNumber))
+    .digest("base64url");
+}
+
+function isValidBillToken(receiptNumber, token) {
+  if (!token) {
+    return false;
+  }
+
+  const expected = createBillToken(receiptNumber);
+  const expectedBuffer = Buffer.from(expected);
+  const tokenBuffer = Buffer.from(String(token));
+  return expectedBuffer.length === tokenBuffer.length && crypto.timingSafeEqual(expectedBuffer, tokenBuffer);
+}
+
+function getBillSecret() {
+  return process.env.BILL_LINK_SECRET
+    || process.env.ADMIN_PASSWORD
+    || process.env.SUPABASE_SERVICE_ROLE_KEY
+    || "ChatpataBites-bill-link-secret";
+}
+
+function publicOrder(order) {
+  return {
+    businessName: order.businessName || process.env.BUSINESS_NAME || "Chatpata Bites",
+    businessPhone: order.businessPhone || process.env.BUSINESS_PHONE || "",
+    customerName: order.customerName,
+    receiptNumber: order.receiptNumber,
+    items: order.items || [],
+    subtotal: Number(order.subtotal || 0),
+    discount: Number(order.discount || 0),
+    tax: Number(order.tax || 0),
+    total: Number(order.total || 0),
+    createdAt: order.createdAt,
+    savedAt: order.savedAt,
+    updatedAt: order.updatedAt,
+    currencySymbol: process.env.CURRENCY_SYMBOL || "\u20B9"
+  };
+}
+
+function buildUpiUrl(order) {
+  const payeeName = order.businessName || process.env.BUSINESS_NAME || "Chatpata Bites";
+  const params = new URLSearchParams({
+    pa: upiId,
+    pn: payeeName,
+    am: Number(order.total || 0).toFixed(2),
+    cu: "INR",
+    tn: `Receipt ${order.receiptNumber}`
+  });
+  return `upi://pay?${params.toString()}`;
+}
+
+async function sendBillQr(res, order) {
+  const qrBuffer = await QRCode.toBuffer(buildUpiUrl(order), {
+    type: "png",
+    errorCorrectionLevel: "M",
+    margin: 2,
+    width: 320
+  });
+  res.writeHead(200, {
+    "Content-Type": "image/png",
+    "Cache-Control": "no-store"
+  });
+  res.end(qrBuffer);
+}
+
+function buildWhatsAppUrl(order, billUrl) {
+  const message = buildBillMessage(order, billUrl);
+  return `https://wa.me/?text=${encodeURIComponent(message)}`;
 }
 
 function mapSalesOrderToDb(order) {
@@ -596,6 +874,163 @@ function mapSupplierRecordFromDb(row) {
   };
 }
 
+async function scheduleReviewMessage(details) {
+  const message = {
+    id: `review-${details.receiptNumber}-${Date.now()}`,
+    receiptNumber: details.receiptNumber,
+    customerName: details.customerName,
+    customerPhone: details.customerPhone,
+    businessName: details.businessName,
+    businessPhone: details.businessPhone,
+    googleReviewLink: details.googleReviewLink,
+    scheduledAt: details.scheduledAt,
+    status: "pending",
+    attempts: 0,
+    lastError: "",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  const supabase = getSupabaseConfig();
+  if (supabase.ok) {
+    await supabaseRequest("/rest/v1/scheduled_review_messages", {
+      method: "POST",
+      headers: { "Prefer": "return=minimal" },
+      body: JSON.stringify(mapScheduledReviewToDb(message))
+    });
+    return message;
+  }
+
+  const messages = await readScheduledReviewMessages();
+  messages.unshift(message);
+  writeScheduledReviewMessagesLocal(messages);
+  return message;
+}
+
+async function processScheduledReviews() {
+  const smsConfig = getSmsConfig();
+  if (!smsConfig.ok) {
+    return;
+  }
+
+  const now = new Date();
+  const messages = await readScheduledReviewMessages();
+  const dueMessages = messages.filter((message) => (
+    message.status === "pending"
+    && Number(message.attempts || 0) < maxReviewAttempts
+    && new Date(message.scheduledAt) <= now
+  ));
+
+  for (const message of dueMessages) {
+    try {
+      await sendSms(message.customerPhone, buildDelayedReviewMessage(message), smsConfig);
+      await updateScheduledReviewMessage({
+        ...message,
+        status: "sent",
+        attempts: Number(message.attempts || 0) + 1,
+        lastError: "",
+        sentAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      });
+    } catch (error) {
+      const attempts = Number(message.attempts || 0) + 1;
+      await updateScheduledReviewMessage({
+        ...message,
+        status: attempts >= maxReviewAttempts ? "failed" : "pending",
+        attempts,
+        lastError: error.message || "Review SMS failed.",
+        scheduledAt: attempts >= maxReviewAttempts
+          ? message.scheduledAt
+          : new Date(Date.now() + reviewRetryDelayMs).toISOString(),
+        updatedAt: new Date().toISOString()
+      });
+      writeSmsErrorLog(error.details || { error: error.message, receiptNumber: message.receiptNumber });
+    }
+  }
+}
+
+async function readScheduledReviewMessages() {
+  const supabase = getSupabaseConfig();
+  if (supabase.ok) {
+    const rows = await supabaseRequest("/rest/v1/scheduled_review_messages?select=*&order=scheduled_at.asc");
+    return rows.map(mapScheduledReviewFromDb);
+  }
+
+  if (!fs.existsSync(scheduledReviewsPath)) {
+    return [];
+  }
+
+  try {
+    const parsed = JSON.parse(stripBom(fs.readFileSync(scheduledReviewsPath, "utf8")));
+    return Array.isArray(parsed) ? parsed : [parsed];
+  } catch {
+    return [];
+  }
+}
+
+async function updateScheduledReviewMessage(message) {
+  const supabase = getSupabaseConfig();
+  if (supabase.ok) {
+    await supabaseRequest(`/rest/v1/scheduled_review_messages?id=eq.${encodeURIComponent(message.id)}`, {
+      method: "PATCH",
+      headers: { "Prefer": "return=minimal" },
+      body: JSON.stringify(mapScheduledReviewToDb(message))
+    });
+    return;
+  }
+
+  const messages = await readScheduledReviewMessages();
+  const index = messages.findIndex((entry) => entry.id === message.id);
+  if (index === -1) {
+    return;
+  }
+  messages[index] = message;
+  writeScheduledReviewMessagesLocal(messages);
+}
+
+function writeScheduledReviewMessagesLocal(messages) {
+  fs.mkdirSync(dataDir, { recursive: true });
+  fs.writeFileSync(scheduledReviewsPath, JSON.stringify(messages, null, 2));
+}
+
+function mapScheduledReviewToDb(message) {
+  return {
+    id: message.id,
+    receipt_number: message.receiptNumber,
+    customer_name: message.customerName,
+    customer_phone: message.customerPhone,
+    business_name: message.businessName,
+    business_phone: message.businessPhone,
+    google_review_link: message.googleReviewLink,
+    scheduled_at: message.scheduledAt,
+    status: message.status,
+    attempts: message.attempts,
+    last_error: message.lastError || null,
+    sent_at: message.sentAt || null,
+    created_at: message.createdAt,
+    updated_at: message.updatedAt
+  };
+}
+
+function mapScheduledReviewFromDb(row) {
+  return {
+    id: row.id,
+    receiptNumber: row.receipt_number,
+    customerName: row.customer_name,
+    customerPhone: row.customer_phone,
+    businessName: row.business_name,
+    businessPhone: row.business_phone,
+    googleReviewLink: row.google_review_link,
+    scheduledAt: row.scheduled_at,
+    status: row.status,
+    attempts: Number(row.attempts || 0),
+    lastError: row.last_error || "",
+    sentAt: row.sent_at || "",
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
 function getMonthKey(value) {
   const date = parseDate(value);
   return date.toISOString().slice(0, 7);
@@ -616,8 +1051,8 @@ function stripBom(value) {
 }
 
 function getSmsConfig() {
-  const username = process.env.SMSGATE_USERNAME;
-  const password = process.env.SMSGATE_PASSWORD;
+  const username = String(process.env.SMSGATE_USERNAME || "").trim();
+  const password = String(process.env.SMSGATE_PASSWORD || "").trim();
 
   if (!username || !password) {
     return {

@@ -34,3 +34,23 @@ create table if not exists public.supplier_records (
 
 create index if not exists supplier_records_transaction_date_idx
   on public.supplier_records (transaction_date desc);
+
+create table if not exists public.scheduled_review_messages (
+  id text primary key,
+  receipt_number text not null,
+  customer_name text not null,
+  customer_phone text not null,
+  business_name text,
+  business_phone text,
+  google_review_link text not null,
+  scheduled_at timestamptz not null,
+  status text not null default 'pending',
+  attempts integer not null default 0,
+  last_error text,
+  sent_at timestamptz,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create index if not exists scheduled_review_messages_due_idx
+  on public.scheduled_review_messages (status, scheduled_at);

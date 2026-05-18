@@ -401,6 +401,70 @@ button:disabled {
   font-size: 0.9rem;
 }
 
+.bill-shell {
+  min-height: 100vh;
+  padding: 24px;
+  display: grid;
+  place-items: start center;
+}
+
+.bill-card {
+  width: min(100%, 520px);
+}
+
+.bill-receipt {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+}
+
+.payment-box {
+  border-top: 1px dashed #a8a196;
+  margin-top: 22px;
+  padding-top: 18px;
+  text-align: center;
+}
+
+.payment-box h3 {
+  margin: 0 0 8px;
+  font-size: 1rem;
+}
+
+.payment-box p {
+  margin: 8px 0;
+  color: var(--muted);
+}
+
+.upi-qr {
+  display: block;
+  width: min(100%, 260px);
+  height: auto;
+  margin: 14px auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 10px;
+}
+
+.pay-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 42px;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  background: var(--accent);
+  color: #ffffff;
+  padding: 0 16px;
+  text-decoration: none;
+  font-weight: 700;
+}
+
+.pay-button:hover {
+  background: var(--accent-dark);
+}
+
 @media (max-width: 920px) {
   .workspace {
     grid-template-columns: 1fr;

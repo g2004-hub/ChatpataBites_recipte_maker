@@ -68,7 +68,8 @@ async function init() {
     window.print();
   });
 
-  document.querySelector("#sendReview").addEventListener("click", sendReviewSms);
+  document.querySelector("#sendBill").addEventListener("click", sendBillSms);
+  document.querySelector("#shareBillWhatsApp").addEventListener("click", shareBillWhatsApp);
   document.querySelector("#newOrder").addEventListener("click", startNewOrder);
 
   form.addEventListener("input", () => {
@@ -231,39 +232,29 @@ function renderReceipt() {
   `;
 }
 
-async function sendReviewSms() {
+async function sendBillSms() {
   const order = getOrder();
 
   if (!order.customerName || !order.customerPhone || !order.receiptNumber) {
-    showMessage("Add customer name, phone, and receipt number before sending SMS.", "error");
+    showMessage("Add customer name, phone, and receipt number before sending the bill.", "error");
     return;
   }
 
   if (!order.googleReviewLink) {
-    showMessage("Add your Google review link before sending SMS.", "error");
+    showMessage("Add your Google review link before sending the bill.", "error");
     return;
   }
 
-  const button = document.querySelector("#sendReview");
+  const button = document.querySelector("#sendBill");
   button.disabled = true;
-  button.textContent = "Sending...";
+  button.textContent = "Sending bill...";
 
   try {
     showMessage("", "");
-    await saveOrder();
-    const response = await fetch("/api/send-review", {
+    const response = await fetch("/api/send-bill", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        businessName: order.businessName,
-        businessPhone: order.businessPhone,
-        customerName: order.customerName,
-        customerPhone: order.customerPhone,
-        receiptNumber: order.receiptNumber,
-        total: order.total,
-        currencySymbol: state.currencySymbol,
-        googleReviewLink: order.googleReviewLink
-      })
+      body: JSON.stringify(order)
     });
 
     const result = await response.json();
@@ -271,12 +262,46 @@ async function sendReviewSms() {
       throw new Error(formatSmsError(result));
     }
 
-    showMessage(`Review SMS sent to ${result.phoneNumber}. Order saved.`, "success");
+    showMessage(`Bill link sent to ${result.phoneNumber}. Review SMS will send after 10 minutes.`, "success");
   } catch (error) {
     showMessage(error.message, "error");
   } finally {
     button.disabled = false;
-    button.textContent = "Send review SMS";
+    button.textContent = "Send bill to customer";
+  }
+}
+
+async function shareBillWhatsApp() {
+  const order = getOrder();
+
+  if (!order.customerName || !order.customerPhone || !order.receiptNumber || !order.items.length) {
+    showMessage("Add customer details and at least one item before sharing the bill.", "error");
+    return;
+  }
+
+  const button = document.querySelector("#shareBillWhatsApp");
+  button.disabled = true;
+  button.textContent = "Preparing...";
+
+  try {
+    showMessage("", "");
+    const response = await fetch("/api/bill-link", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(order)
+    });
+    const result = await response.json();
+    if (!response.ok) {
+      throw new Error(result.error || "Could not create bill link.");
+    }
+
+    window.open(result.whatsappUrl, "_blank", "noopener");
+    showMessage("WhatsApp bill message opened. Review SMS is not scheduled for manual WhatsApp sharing.", "success");
+  } catch (error) {
+    showMessage(error.message, "error");
+  } finally {
+    button.disabled = false;
+    button.textContent = "WhatsApp bill link";
   }
 }
 

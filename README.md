@@ -1,6 +1,6 @@
 # Receipt Maker
 
-A small receipt maker website with receipt preview, print support, and a review SMS sender through SMS Gateway for Android / SMSGate.
+A small receipt maker website with receipt preview, print support, bill-link SMS sending, UPI payment links, and delayed review SMS sending through SMS Gateway for Android / SMSGate.
 
 ## Run it
 
@@ -23,15 +23,23 @@ For permanent Railway storage, create a Supabase project, run `supabase-schema.s
 
 - Your shop name and phone number.
 - Your Google review link.
+- A public app URL as `PUBLIC_BASE_URL` for bill links when deployed.
+- A long private `BILL_LINK_SECRET` for secure customer bill links.
 - SMSGate username and password.
 - SMSGate device ID from your Android SMSGate app.
 - SIM slot number if the phone has multiple SIM cards.
 - A test customer phone number in the same format your SMSGate account accepts, usually E.164 like `+919876543210`.
 - An admin password in `.env` as `ADMIN_PASSWORD`.
 
+## Bill links and review SMS
+
+The "Send bill to customer" button sends the customer a secure bill preview link immediately. The bill page only shows that customer's bill and UPI payment options for `8260586748@ybl`.
+
+After the bill SMS is sent successfully, the app queues a Google review SMS for 10 minutes later. With Supabase configured, the queue is stored in `scheduled_review_messages`; without Supabase, it is stored locally in `data/scheduled-review-messages.json`.
+
 ## SMSGate setup
 
-The backend sends review messages to:
+The backend sends bill and review messages to:
 
 ```text
 POST https://api.sms-gate.app/3rdparty/v1/messages
