@@ -465,6 +465,32 @@ button:disabled {
   background: var(--accent-dark);
 }
 
+.payment-status {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  margin-top: 12px;
+  padding: 12px;
+  font-weight: 700;
+}
+
+.payment-status.waiting {
+  background: #fff7e8;
+  color: #8a4b12;
+  border-color: #e0bc82;
+}
+
+.payment-status.success {
+  background: #eefaf6;
+  color: var(--accent-dark);
+  border-color: #8cc6b8;
+}
+
+.payment-status.review {
+  background: #fff4f2;
+  color: #7a271a;
+  border-color: #ef9a9a;
+}
+
 @media (max-width: 920px) {
   .workspace {
     grid-template-columns: 1fr;

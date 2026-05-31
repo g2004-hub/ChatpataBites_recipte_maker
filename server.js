@@ -11,11 +11,27 @@ const publicDir = path.join(__dirname, "public");
 const dataDir = path.join(__dirname, "data");
 const ordersPath = path.join(dataDir, "orders.json");
 const scheduledReviewsPath = path.join(dataDir, "scheduled-review-messages.json");
+const incomingSmsPath = path.join(dataDir, "incoming-payment-sms.json");
+const gmailTokenPath = path.join(dataDir, "gmail-oauth-token.json");
+const processedGmailPath = path.join(dataDir, "processed-gmail-messages.json");
+const incomingEmailPath = path.join(dataDir, "incoming-payment-emails.json");
 const port = Number(process.env.PORT || 3000);
 const upiId = "8260586748@ybl";
 const reviewDelayMs = 10 * 60 * 1000;
 const reviewRetryDelayMs = 5 * 60 * 1000;
 const maxReviewAttempts = 3;
+const paymentMatchWindowMs = 2 * 60 * 60 * 1000;
+const paymentStatuses = {
+  unpaid: "unpaid",
+  cash: "cash_paid",
+  detected: "payment_detected",
+  review: "needs_review",
+  paid: "paid_confirmed"
+};
+const paymentModes = {
+  cash: "cash",
+  online: "online"
+};
 
 const mimeTypes = {
   ".html": "text/html; charset=utf-8",
@@ -58,6 +74,11 @@ const server = http.createServer(async (req, res) => {
       return handleCreateBillLink(body, req, res);
     }
 
+    if (req.method === "POST" && requestUrl.pathname === "/api/smsgate/incoming") {
+      const rawBody = await readRawBody(req);
+      return handleSmsGateIncoming(rawBody, req, res);
+    }
+
     if (req.method === "POST" && requestUrl.pathname === "/api/orders") {
       const body = await readJson(req);
       return handleSaveOrder(body, res);
@@ -75,6 +96,23 @@ const server = http.createServer(async (req, res) => {
       return handleAdminOverview(requestUrl, res);
     }
 
+    if (req.method === "GET" && requestUrl.pathname === "/api/admin/gmail/connect-url") {
+      return handleGmailConnectUrl(requestUrl, req, res);
+    }
+
+    if (req.method === "GET" && requestUrl.pathname === "/api/admin/gmail/callback") {
+      return handleGmailCallback(requestUrl, req, res);
+    }
+
+    if (req.method === "GET" && requestUrl.pathname === "/api/admin/gmail/status") {
+      return handleGmailStatus(requestUrl, res);
+    }
+
+    if (req.method === "POST" && requestUrl.pathname === "/api/admin/gmail/disconnect") {
+      const body = await readJson(req);
+      return handleGmailDisconnect(body, res);
+    }
+
     if (req.method === "POST" && requestUrl.pathname === "/api/admin/supplier-records") {
       const body = await readJson(req);
       return handleSaveSupplierRecord(body, res);
@@ -90,6 +128,12 @@ const server = http.createServer(async (req, res) => {
       const body = await readJson(req);
       const receiptNumber = decodeURIComponent(requestUrl.pathname.replace("/api/admin/orders/", ""));
       return handleUpdateAdminOrder(receiptNumber, body, res);
+    }
+
+    if (req.method === "POST" && requestUrl.pathname.startsWith("/api/admin/payment-status/")) {
+      const body = await readJson(req);
+      const receiptNumber = decodeURIComponent(requestUrl.pathname.replace("/api/admin/payment-status/", ""));
+      return handleAdminPaymentStatus(receiptNumber, body, res);
     }
 
     if (req.method !== "GET") {
@@ -118,6 +162,15 @@ setInterval(() => {
 }, 60 * 1000);
 processScheduledReviews().catch((error) => {
   console.error("Scheduled review worker failed:", error);
+});
+
+setInterval(() => {
+  processGmailPayments().catch((error) => {
+    console.error("Gmail payment worker failed:", error);
+  });
+}, 2 * 60 * 1000);
+processGmailPayments().catch((error) => {
+  console.error("Gmail payment worker failed:", error);
 });
 
 async function handleSendReview(body, res) {
@@ -254,6 +307,133 @@ async function handleCreateBillLink(body, req, res) {
   });
 }
 
+async function handleSmsGateIncoming(rawBody, req, res) {
+  if (!isValidSmsGateWebhook(rawBody, req)) {
+    return sendJson(res, 401, { error: "Invalid webhook signature." });
+  }
+
+  let webhook;
+  try {
+    webhook = JSON.parse(rawBody || "{}");
+  } catch {
+    return sendJson(res, 400, { error: "Invalid webhook JSON." });
+  }
+
+  if (webhook.event !== "sms:received") {
+    return sendJson(res, 200, { ok: true, ignored: true });
+  }
+
+  const payload = webhook.payload || {};
+  const smsText = String(payload.message || "");
+  const parsedPayment = await parsePaymentSms(smsText, {
+    sender: payload.sender || payload.phoneNumber || "",
+    receivedAt: payload.receivedAt || new Date().toISOString()
+  });
+
+  const smsRecord = {
+    id: webhook.id || payload.messageId || `sms-${Date.now()}`,
+    messageId: payload.messageId || "",
+    sender: payload.sender || payload.phoneNumber || "",
+    recipient: payload.recipient || "",
+    receivedAt: payload.receivedAt || new Date().toISOString(),
+    message: smsText,
+    parsed: parsedPayment,
+    matchStatus: "ignored",
+    matchedReceiptNumber: "",
+    createdAt: new Date().toISOString()
+  };
+
+  if (parsedPayment.isPaymentCredit && parsedPayment.amount > 0) {
+    const matchResult = await matchIncomingPayment(parsedPayment, smsRecord);
+    smsRecord.matchStatus = matchResult.matchStatus;
+    smsRecord.matchedReceiptNumber = matchResult.receiptNumber || "";
+  }
+
+  await writeIncomingSmsRecord(smsRecord);
+  return sendJson(res, 200, {
+    ok: true,
+    parsed: parsedPayment,
+    matchStatus: smsRecord.matchStatus,
+    receiptNumber: smsRecord.matchedReceiptNumber
+  });
+}
+
+async function handleGmailConnectUrl(requestUrl, req, res) {
+  if (!isValidAdminRequest(requestUrl)) {
+    return sendJson(res, 401, { error: "Invalid admin password." });
+  }
+
+  const config = getGmailConfig(req);
+  if (!config.ok) {
+    return sendJson(res, 400, { error: config.error });
+  }
+
+  const state = createGmailOAuthState();
+  const authUrl = new URL("https://accounts.google.com/o/oauth2/v2/auth");
+  authUrl.searchParams.set("client_id", config.clientId);
+  authUrl.searchParams.set("redirect_uri", config.redirectUri);
+  authUrl.searchParams.set("response_type", "code");
+  authUrl.searchParams.set("scope", "https://www.googleapis.com/auth/gmail.readonly");
+  authUrl.searchParams.set("access_type", "offline");
+  authUrl.searchParams.set("prompt", "consent");
+  authUrl.searchParams.set("include_granted_scopes", "true");
+  authUrl.searchParams.set("state", state);
+
+  return sendJson(res, 200, { ok: true, authUrl: authUrl.toString() });
+}
+
+async function handleGmailCallback(requestUrl, req, res) {
+  const code = requestUrl.searchParams.get("code") || "";
+  const state = requestUrl.searchParams.get("state") || "";
+  const config = getGmailConfig(req);
+
+  if (!config.ok || !code || !isValidGmailOAuthState(state)) {
+    return sendHtml(res, 400, "<h1>Gmail connection failed</h1><p>Invalid OAuth response.</p>");
+  }
+
+  try {
+    const tokenResponse = await exchangeGmailCode(code, config);
+    const profile = await getGmailProfile(tokenResponse.access_token);
+    await writeGmailToken({
+      email: profile.emailAddress || "",
+      refreshToken: tokenResponse.refresh_token,
+      accessToken: tokenResponse.access_token,
+      expiresAt: new Date(Date.now() + Number(tokenResponse.expires_in || 3600) * 1000).toISOString(),
+      connectedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    });
+
+    return sendHtml(res, 200, "<h1>Gmail connected</h1><p>You can close this tab and return to the admin panel.</p>");
+  } catch (error) {
+    console.error(error);
+    return sendHtml(res, 500, "<h1>Gmail connection failed</h1><p>Could not save Gmail access.</p>");
+  }
+}
+
+async function handleGmailStatus(requestUrl, res) {
+  if (!isValidAdminRequest(requestUrl)) {
+    return sendJson(res, 401, { error: "Invalid admin password." });
+  }
+
+  const token = await readGmailToken();
+  return sendJson(res, 200, {
+    ok: true,
+    connected: Boolean(token && token.refreshToken),
+    email: token?.email || "",
+    connectedAt: token?.connectedAt || "",
+    query: getGmailSearchQuery()
+  });
+}
+
+async function handleGmailDisconnect(body, res) {
+  if (!isValidAdminPassword(body.adminPassword)) {
+    return sendJson(res, 401, { error: "Invalid admin password." });
+  }
+
+  await deleteGmailToken();
+  return sendJson(res, 200, { ok: true });
+}
+
 async function handlePublicBillRequest(requestUrl, res) {
   const parts = requestUrl.pathname.split("/").filter(Boolean);
   const receiptNumber = decodeURIComponent(parts[2] || "");
@@ -266,6 +446,16 @@ async function handlePublicBillRequest(requestUrl, res) {
   const order = await findOrderByReceipt(receiptNumber);
   if (!order) {
     return sendJson(res, 404, { error: "Bill not found." });
+  }
+
+  if (parts[3] === "status") {
+    return sendJson(res, 200, {
+      paymentMode: order.paymentMode || paymentModes.online,
+      paymentStatus: order.paymentStatus || paymentStatuses.unpaid,
+      paymentDetectedAt: order.paymentDetectedAt || "",
+      paymentConfirmedAt: order.paymentConfirmedAt || "",
+      paymentMatchNote: order.paymentMatchNote || ""
+    });
   }
 
   if (parts[3] === "qr") {
@@ -412,6 +602,34 @@ async function handleUpdateAdminOrder(receiptNumber, body, res) {
   return sendJson(res, 200, { ok: true, order });
 }
 
+async function handleAdminPaymentStatus(receiptNumber, body, res) {
+  if (!isValidAdminPassword(body.adminPassword)) {
+    return sendJson(res, 401, { error: "Invalid admin password." });
+  }
+
+  const allowedStatuses = new Set([paymentStatuses.unpaid, paymentStatuses.cash, paymentStatuses.detected, paymentStatuses.review, paymentStatuses.paid]);
+  const status = String(body.paymentStatus || "");
+  if (!allowedStatuses.has(status)) {
+    return sendJson(res, 400, { error: "Invalid payment status." });
+  }
+
+  const order = await findOrderByReceipt(receiptNumber);
+  if (!order) {
+    return sendJson(res, 404, { error: "Sell record not found." });
+  }
+
+  const updatedOrder = {
+    ...order,
+    paymentStatus: status,
+    paymentConfirmedAt: status === paymentStatuses.paid || status === paymentStatuses.cash ? new Date().toISOString() : "",
+    paymentDetectedAt: status === paymentStatuses.unpaid ? "" : order.paymentDetectedAt || "",
+    paymentMatchNote: status === paymentStatuses.unpaid ? "" : order.paymentMatchNote || "Updated by admin."
+  };
+
+  await updateOrderPaymentStatus(updatedOrder);
+  return sendJson(res, 200, { ok: true, order: updatedOrder });
+}
+
 function isValidAdminRequest(requestUrl) {
   return isValidAdminPassword(requestUrl.searchParams.get("password") || "");
 }
@@ -430,6 +648,14 @@ function sanitizeOrder(body) {
     customerPhone: normalizePhoneNumber(body.customerPhone) || String(body.customerPhone || "").trim(),
     receiptNumber: String(body.receiptNumber || "").trim(),
     googleReviewLink: String(body.googleReviewLink || "").trim(),
+    paymentMode: body.paymentMode === paymentModes.cash ? paymentModes.cash : paymentModes.online,
+    paymentStatus: String(body.paymentStatus || (body.paymentMode === paymentModes.cash ? paymentStatuses.cash : paymentStatuses.unpaid)),
+    paymentDetectedAt: String(body.paymentDetectedAt || ""),
+    paymentConfirmedAt: String(body.paymentConfirmedAt || (body.paymentMode === paymentModes.cash ? new Date().toISOString() : "")),
+    paymentReference: String(body.paymentReference || ""),
+    paymentSource: String(body.paymentSource || (body.paymentMode === paymentModes.cash ? "cash" : "")),
+    paymentMatchNote: String(body.paymentMatchNote || (body.paymentMode === paymentModes.cash ? "Cash payment selected at billing." : "")),
+    paymentSmsId: String(body.paymentSmsId || ""),
     items: items.map((item) => ({
       name: String(item.name || "").trim(),
       qty: Number(item.qty || 0),
@@ -575,6 +801,36 @@ async function writeSupplierRecord(record) {
   fs.writeFileSync(localPath, JSON.stringify(records, null, 2));
 }
 
+async function updateOrderPaymentStatus(order) {
+  const supabase = getSupabaseConfig();
+  if (supabase.ok) {
+    await supabaseRequest(`/rest/v1/sales_orders?receipt_number=eq.${encodeURIComponent(order.receiptNumber)}`, {
+      method: "PATCH",
+      headers: { "Prefer": "return=minimal" },
+      body: JSON.stringify({
+        payment_status: order.paymentStatus || paymentStatuses.unpaid,
+        payment_detected_at: order.paymentDetectedAt || null,
+        payment_confirmed_at: order.paymentConfirmedAt || null,
+        payment_reference: order.paymentReference || null,
+        payment_source: order.paymentSource || null,
+        payment_match_note: order.paymentMatchNote || null,
+        payment_sms_id: order.paymentSmsId || null,
+        updated_at: new Date().toISOString()
+      })
+    });
+    return;
+  }
+
+  const orders = await readOrders();
+  const index = orders.findIndex((entry) => entry.receiptNumber === order.receiptNumber);
+  if (index === -1) {
+    throw new Error("Sell record not found.");
+  }
+
+  orders[index] = { ...orders[index], ...order, updatedAt: new Date().toISOString() };
+  writeOrdersLocal(orders);
+}
+
 async function updateSupplierRecord(record) {
   const supabase = getSupabaseConfig();
   if (supabase.ok) {
@@ -702,10 +958,11 @@ async function sendSms(phoneNumber, message, smsConfig = getSmsConfig()) {
 }
 
 function buildBillMessage(order, billUrl) {
+  const actionText = order.paymentMode === paymentModes.cash ? "View your receipt here" : "View and pay here";
   return [
     `Hi ${order.customerName}, your Chatpata Bites bill is ready.`,
     `Receipt ${order.receiptNumber}: ${process.env.CURRENCY_SYMBOL || "\u20B9"}${Number(order.total).toFixed(2)}.`,
-    `View and pay here: ${billUrl}`,
+    `${actionText}: ${billUrl}`,
     `For any query contact ${order.businessPhone || process.env.BUSINESS_PHONE || "us"}.`
   ].join(" ");
 }
@@ -773,7 +1030,9 @@ function publicOrder(order) {
     createdAt: order.createdAt,
     savedAt: order.savedAt,
     updatedAt: order.updatedAt,
-    currencySymbol: process.env.CURRENCY_SYMBOL || "\u20B9"
+    currencySymbol: process.env.CURRENCY_SYMBOL || "\u20B9",
+    paymentMode: order.paymentMode || paymentModes.online,
+    paymentStatus: order.paymentStatus || paymentStatuses.unpaid
   };
 }
 
@@ -790,6 +1049,10 @@ function buildUpiUrl(order) {
 }
 
 async function sendBillQr(res, order) {
+  if ((order.paymentMode || paymentModes.online) === paymentModes.cash) {
+    return sendJson(res, 404, { error: "Cash bills do not have a payment QR." });
+  }
+
   const qrBuffer = await QRCode.toBuffer(buildUpiUrl(order), {
     type: "png",
     errorCorrectionLevel: "M",
@@ -808,9 +1071,703 @@ function buildWhatsAppUrl(order, billUrl) {
   return `https://wa.me/?text=${encodeURIComponent(message)}`;
 }
 
+function getGmailConfig(req) {
+  const fileConfig = readGoogleClientSecretFile();
+  const clientId = String(process.env.GOOGLE_CLIENT_ID || fileConfig.clientId || "").trim();
+  const clientSecret = String(process.env.GOOGLE_CLIENT_SECRET || fileConfig.clientSecret || "").trim();
+  const redirectUri = String(
+    process.env.GOOGLE_REDIRECT_URI
+    || fileConfig.redirectUris.find((uri) => uri.includes(req?.headers?.host || "localhost:3000"))
+    || fileConfig.redirectUris[0]
+    || ""
+  ).trim();
+
+  if (!clientId || !clientSecret || !redirectUri) {
+    return {
+      ok: false,
+      error: "Google OAuth client is not configured. Set GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, and GOOGLE_REDIRECT_URI."
+    };
+  }
+
+  return { ok: true, clientId, clientSecret, redirectUri };
+}
+
+function readGoogleClientSecretFile() {
+  const explicitPath = process.env.GOOGLE_CLIENT_SECRET_FILE;
+  const candidatePaths = [
+    explicitPath,
+    path.join(process.env.USERPROFILE || "", "Downloads", "client_secret_320944108695-qj3ifgs1292737o0n3uja5pd9un6tpni.apps.googleusercontent.com.json")
+  ].filter(Boolean);
+
+  for (const candidatePath of candidatePaths) {
+    if (!fs.existsSync(candidatePath)) {
+      continue;
+    }
+    try {
+      const parsed = JSON.parse(fs.readFileSync(candidatePath, "utf8"));
+      const details = parsed.web || parsed.installed;
+      if (details?.client_id && details?.client_secret) {
+        return {
+          clientId: details.client_id,
+          clientSecret: details.client_secret,
+          redirectUris: details.redirect_uris || []
+        };
+      }
+    } catch {
+      // Ignore malformed local OAuth files and fall back to environment variables.
+    }
+  }
+
+  return { clientId: "", clientSecret: "", redirectUris: [] };
+}
+
+function createGmailOAuthState() {
+  const timestamp = String(Date.now());
+  const nonce = crypto.randomBytes(12).toString("base64url");
+  const payload = `${timestamp}.${nonce}`;
+  const signature = crypto.createHmac("sha256", getBillSecret()).update(payload).digest("base64url");
+  return `${payload}.${signature}`;
+}
+
+function isValidGmailOAuthState(state) {
+  const parts = String(state || "").split(".");
+  if (parts.length !== 3) {
+    return false;
+  }
+
+  const [timestamp, nonce, signature] = parts;
+  const payload = `${timestamp}.${nonce}`;
+  const expected = crypto.createHmac("sha256", getBillSecret()).update(payload).digest("base64url");
+  const expectedBuffer = Buffer.from(expected);
+  const signatureBuffer = Buffer.from(signature);
+  const isFresh = Date.now() - Number(timestamp) < 10 * 60 * 1000;
+  return isFresh
+    && expectedBuffer.length === signatureBuffer.length
+    && crypto.timingSafeEqual(expectedBuffer, signatureBuffer);
+}
+
+async function exchangeGmailCode(code, config) {
+  const response = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      code,
+      client_id: config.clientId,
+      client_secret: config.clientSecret,
+      redirect_uri: config.redirectUri,
+      grant_type: "authorization_code"
+    })
+  });
+
+  const result = await response.json();
+  if (!response.ok) {
+    throw new Error(result.error_description || result.error || "Gmail OAuth token exchange failed.");
+  }
+  if (!result.refresh_token) {
+    throw new Error("Google did not return a refresh token. Reconnect Gmail and approve offline access.");
+  }
+  return result;
+}
+
+async function refreshGmailAccessToken(token) {
+  const config = getGmailConfig();
+  if (!config.ok || !token?.refreshToken) {
+    return null;
+  }
+
+  const response = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      client_id: config.clientId,
+      client_secret: config.clientSecret,
+      refresh_token: token.refreshToken,
+      grant_type: "refresh_token"
+    })
+  });
+
+  const result = await response.json();
+  if (!response.ok) {
+    throw new Error(result.error_description || result.error || "Could not refresh Gmail access.");
+  }
+
+  const updatedToken = {
+    ...token,
+    accessToken: result.access_token,
+    expiresAt: new Date(Date.now() + Number(result.expires_in || 3600) * 1000).toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  await writeGmailToken(updatedToken);
+  return updatedToken;
+}
+
+async function getGmailProfile(accessToken) {
+  const response = await fetch("https://gmail.googleapis.com/gmail/v1/users/me/profile", {
+    headers: { "Authorization": `Bearer ${accessToken}` }
+  });
+  if (!response.ok) {
+    return {};
+  }
+  return response.json();
+}
+
+async function processGmailPayments() {
+  const token = await readGmailToken();
+  if (!token?.refreshToken) {
+    return;
+  }
+
+  const accessToken = await getValidGmailAccessToken(token);
+  if (!accessToken) {
+    return;
+  }
+
+  const processedIds = await readProcessedGmailMessages();
+  const messageIds = await searchGmailMessages(accessToken, getGmailSearchQuery());
+  for (const messageId of messageIds) {
+    if (processedIds.has(messageId)) {
+      continue;
+    }
+
+    try {
+      const email = await getGmailMessage(accessToken, messageId);
+      const allowed = isAllowedPaymentEmail(email.from);
+      const parsedPayment = allowed
+        ? await parsePaymentEmail(`${email.subject}\n\n${email.text}`, {
+          sender: email.from,
+          receivedAt: email.receivedAt
+        })
+        : { isPaymentCredit: false, amount: 0, paymentTime: "", reference: "", payer: "", confidence: 0, reason: "Sender not allowed." };
+
+      const emailRecord = {
+        id: messageId,
+        from: email.from,
+        subject: email.subject,
+        receivedAt: email.receivedAt,
+        text: email.text,
+        parsed: parsedPayment,
+        matchStatus: "ignored",
+        matchedReceiptNumber: "",
+        createdAt: new Date().toISOString()
+      };
+
+      if (allowed && parsedPayment.isPaymentCredit && parsedPayment.amount > 0) {
+        const matchResult = await matchIncomingPaymentRecord(parsedPayment, {
+          id: messageId,
+          source: "gmail_gemini",
+          receivedAt: email.receivedAt,
+          notePrefix: "Payment email"
+        });
+        emailRecord.matchStatus = matchResult.matchStatus;
+        emailRecord.matchedReceiptNumber = matchResult.receiptNumber || "";
+      }
+
+      await writeIncomingEmailRecord(emailRecord);
+      await writeProcessedGmailMessage(messageId);
+    } catch (error) {
+      console.error("Gmail message processing failed:", error);
+    }
+  }
+}
+
+async function getValidGmailAccessToken(token) {
+  if (token.accessToken && new Date(token.expiresAt).getTime() > Date.now() + 60_000) {
+    return token.accessToken;
+  }
+
+  const refreshed = await refreshGmailAccessToken(token);
+  return refreshed?.accessToken || "";
+}
+
+async function searchGmailMessages(accessToken, query) {
+  const url = new URL("https://gmail.googleapis.com/gmail/v1/users/me/messages");
+  url.searchParams.set("q", query);
+  url.searchParams.set("maxResults", "10");
+  const response = await fetch(url, {
+    headers: { "Authorization": `Bearer ${accessToken}` }
+  });
+  if (!response.ok) {
+    throw new Error(`Gmail search failed: ${response.status}`);
+  }
+  const result = await response.json();
+  return (result.messages || []).map((message) => message.id);
+}
+
+async function getGmailMessage(accessToken, messageId) {
+  const response = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${encodeURIComponent(messageId)}?format=full`, {
+    headers: { "Authorization": `Bearer ${accessToken}` }
+  });
+  if (!response.ok) {
+    throw new Error(`Gmail message read failed: ${response.status}`);
+  }
+
+  const message = await response.json();
+  const headers = Object.fromEntries((message.payload?.headers || []).map((header) => [header.name.toLowerCase(), header.value]));
+  return {
+    id: message.id,
+    from: headers.from || "",
+    subject: headers.subject || "",
+    receivedAt: new Date(Number(message.internalDate || Date.now())).toISOString(),
+    text: extractGmailText(message.payload) || message.snippet || ""
+  };
+}
+
+function extractGmailText(part) {
+  if (!part) {
+    return "";
+  }
+  if (part.mimeType === "text/plain" && part.body?.data) {
+    return decodeBase64Url(part.body.data);
+  }
+  if (part.mimeType === "text/html" && part.body?.data) {
+    return decodeBase64Url(part.body.data).replace(/<[^>]+>/g, " ");
+  }
+  return (part.parts || []).map(extractGmailText).filter(Boolean).join("\n");
+}
+
+function decodeBase64Url(value) {
+  return Buffer.from(String(value || "").replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8");
+}
+
+function getGmailSearchQuery() {
+  return process.env.PAYMENT_EMAIL_GMAIL_QUERY || "newer_than:7d (slice OR payment OR credited OR received OR UPI)";
+}
+
+function isAllowedPaymentEmail(from) {
+  const allowed = String(process.env.PAYMENT_EMAIL_ALLOWED_SENDERS || "").split(",").map((entry) => entry.trim().toLowerCase()).filter(Boolean);
+  if (!allowed.length) {
+    return /slice|bank|upi|payment|pay/i.test(from);
+  }
+  const normalizedFrom = String(from || "").toLowerCase();
+  return allowed.some((entry) => normalizedFrom.includes(entry));
+}
+
+async function parsePaymentEmail(message, context = {}) {
+  const fallback = parsePaymentSmsFallback(message);
+  const apiKey = String(process.env.GEMINI_API_KEY || "").trim();
+  if (!apiKey) {
+    return fallback;
+  }
+
+  try {
+    const prompt = [
+      "Extract payment-credit details from this Indian payment alert email.",
+      "Return only JSON that matches this schema:",
+      JSON.stringify({
+        isPaymentCredit: "boolean true only if money was credited/received into merchant account",
+        amount: "number INR amount credited, 0 if none",
+        paymentTime: "ISO timestamp if available, otherwise empty string",
+        reference: "UPI reference/UTR/RRN/transaction id if present, otherwise empty string",
+        payer: "payer name or VPA if present, otherwise empty string",
+        confidence: "number from 0 to 1",
+        reason: "short reason"
+      }),
+      "Do not mark debit, failed, reversal, request, OTP, promotional, or balance-only emails as payment credit.",
+      `Sender: ${context.sender || ""}`,
+      `Received at: ${context.receivedAt || ""}`,
+      `Email: ${message}`
+    ].join("\n");
+
+    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${encodeURIComponent(apiKey)}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: prompt }] }],
+        generationConfig: {
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: "OBJECT",
+            properties: {
+              isPaymentCredit: { type: "BOOLEAN" },
+              amount: { type: "NUMBER" },
+              paymentTime: { type: "STRING" },
+              reference: { type: "STRING" },
+              payer: { type: "STRING" },
+              confidence: { type: "NUMBER" },
+              reason: { type: "STRING" }
+            },
+            required: ["isPaymentCredit", "amount", "paymentTime", "reference", "payer", "confidence", "reason"]
+          }
+        }
+      })
+    });
+
+    if (!response.ok) {
+      return { ...fallback, reason: `${fallback.reason} Gemini email parse failed: ${response.status}` };
+    }
+
+    const result = await response.json();
+    const text = result.candidates?.[0]?.content?.parts?.[0]?.text || "{}";
+    const parsed = JSON.parse(text);
+    return normalizeParsedPayment(parsed, fallback);
+  } catch (error) {
+    return { ...fallback, reason: `${fallback.reason} Gemini email parse error: ${error.message}` };
+  }
+}
+
+async function readGmailToken() {
+  const supabase = getSupabaseConfig();
+  if (supabase.ok) {
+    const rows = await supabaseRequest("/rest/v1/gmail_oauth_tokens?id=eq.default&select=*");
+    return rows[0] ? mapGmailTokenFromDb(rows[0]) : null;
+  }
+  if (!fs.existsSync(gmailTokenPath)) {
+    return null;
+  }
+  try {
+    return JSON.parse(stripBom(fs.readFileSync(gmailTokenPath, "utf8")));
+  } catch {
+    return null;
+  }
+}
+
+async function writeGmailToken(token) {
+  const supabase = getSupabaseConfig();
+  if (supabase.ok) {
+    await supabaseRequest("/rest/v1/gmail_oauth_tokens?on_conflict=id", {
+      method: "POST",
+      headers: { "Prefer": "resolution=merge-duplicates,return=minimal" },
+      body: JSON.stringify(mapGmailTokenToDb(token))
+    });
+    return;
+  }
+  fs.mkdirSync(dataDir, { recursive: true });
+  fs.writeFileSync(gmailTokenPath, JSON.stringify(token, null, 2));
+}
+
+async function deleteGmailToken() {
+  const supabase = getSupabaseConfig();
+  if (supabase.ok) {
+    await supabaseRequest("/rest/v1/gmail_oauth_tokens?id=eq.default", { method: "DELETE" });
+    return;
+  }
+  if (fs.existsSync(gmailTokenPath)) {
+    fs.unlinkSync(gmailTokenPath);
+  }
+}
+
+function mapGmailTokenToDb(token) {
+  return {
+    id: "default",
+    email: token.email,
+    refresh_token: token.refreshToken,
+    access_token: token.accessToken,
+    expires_at: token.expiresAt,
+    connected_at: token.connectedAt,
+    updated_at: token.updatedAt
+  };
+}
+
+function mapGmailTokenFromDb(row) {
+  return {
+    email: row.email || "",
+    refreshToken: row.refresh_token || "",
+    accessToken: row.access_token || "",
+    expiresAt: row.expires_at || "",
+    connectedAt: row.connected_at || "",
+    updatedAt: row.updated_at || ""
+  };
+}
+
+async function readProcessedGmailMessages() {
+  const supabase = getSupabaseConfig();
+  if (supabase.ok) {
+    const rows = await supabaseRequest("/rest/v1/processed_gmail_messages?select=message_id");
+    return new Set(rows.map((row) => row.message_id));
+  }
+  if (!fs.existsSync(processedGmailPath)) {
+    return new Set();
+  }
+  try {
+    return new Set(JSON.parse(stripBom(fs.readFileSync(processedGmailPath, "utf8"))));
+  } catch {
+    return new Set();
+  }
+}
+
+async function writeProcessedGmailMessage(messageId) {
+  const supabase = getSupabaseConfig();
+  if (supabase.ok) {
+    await supabaseRequest("/rest/v1/processed_gmail_messages?on_conflict=message_id", {
+      method: "POST",
+      headers: { "Prefer": "resolution=ignore-duplicates,return=minimal" },
+      body: JSON.stringify({ message_id: messageId, processed_at: new Date().toISOString() })
+    });
+    return;
+  }
+  const processed = await readProcessedGmailMessages();
+  processed.add(messageId);
+  fs.mkdirSync(dataDir, { recursive: true });
+  fs.writeFileSync(processedGmailPath, JSON.stringify([...processed].slice(-1000), null, 2));
+}
+
+async function writeIncomingEmailRecord(record) {
+  const supabase = getSupabaseConfig();
+  if (supabase.ok) {
+    await supabaseRequest("/rest/v1/incoming_payment_emails", {
+      method: "POST",
+      headers: { "Prefer": "return=minimal" },
+      body: JSON.stringify(mapIncomingEmailToDb(record))
+    });
+    return;
+  }
+  const records = readIncomingEmailsLocal();
+  records.unshift(record);
+  fs.mkdirSync(dataDir, { recursive: true });
+  fs.writeFileSync(incomingEmailPath, JSON.stringify(records.slice(0, 500), null, 2));
+}
+
+function readIncomingEmailsLocal() {
+  if (!fs.existsSync(incomingEmailPath)) {
+    return [];
+  }
+  try {
+    const parsed = JSON.parse(stripBom(fs.readFileSync(incomingEmailPath, "utf8")));
+    return Array.isArray(parsed) ? parsed : [parsed];
+  } catch {
+    return [];
+  }
+}
+
+function mapIncomingEmailToDb(record) {
+  return {
+    id: record.id,
+    sender: record.from,
+    subject: record.subject,
+    received_at: record.receivedAt,
+    message: record.text,
+    parsed: record.parsed,
+    match_status: record.matchStatus,
+    matched_receipt_number: record.matchedReceiptNumber || null,
+    created_at: record.createdAt
+  };
+}
+
+async function parsePaymentSms(message, context = {}) {
+  const fallback = parsePaymentSmsFallback(message);
+  const apiKey = String(process.env.GEMINI_API_KEY || "").trim();
+  if (!apiKey) {
+    return fallback;
+  }
+
+  try {
+    const prompt = [
+      "Extract payment-credit details from this Indian bank or UPI SMS.",
+      "Return only JSON that matches this schema:",
+      JSON.stringify({
+        isPaymentCredit: "boolean true only if money was credited/received into merchant account",
+        amount: "number INR amount credited, 0 if none",
+        paymentTime: "ISO timestamp if available, otherwise empty string",
+        reference: "UPI reference/UTR/RRN if present, otherwise empty string",
+        payer: "payer name or VPA if present, otherwise empty string",
+        confidence: "number from 0 to 1",
+        reason: "short reason"
+      }),
+      "Do not mark debit, failed, reversal, request, OTP, promotional, or balance-only SMS as payment credit.",
+      `Sender: ${context.sender || ""}`,
+      `Received at: ${context.receivedAt || ""}`,
+      `SMS: ${message}`
+    ].join("\n");
+
+    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${encodeURIComponent(apiKey)}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: prompt }] }],
+        generationConfig: {
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: "OBJECT",
+            properties: {
+              isPaymentCredit: { type: "BOOLEAN" },
+              amount: { type: "NUMBER" },
+              paymentTime: { type: "STRING" },
+              reference: { type: "STRING" },
+              payer: { type: "STRING" },
+              confidence: { type: "NUMBER" },
+              reason: { type: "STRING" }
+            },
+            required: ["isPaymentCredit", "amount", "paymentTime", "reference", "payer", "confidence", "reason"]
+          }
+        }
+      })
+    });
+
+    if (!response.ok) {
+      return { ...fallback, reason: `${fallback.reason} Gemini parse failed: ${response.status}` };
+    }
+
+    const result = await response.json();
+    const text = result.candidates?.[0]?.content?.parts?.[0]?.text || "{}";
+    const parsed = JSON.parse(text);
+    return normalizeParsedPayment(parsed, fallback);
+  } catch (error) {
+    return { ...fallback, reason: `${fallback.reason} Gemini parse error: ${error.message}` };
+  }
+}
+
+function parsePaymentSmsFallback(message) {
+  const text = String(message || "");
+  const lower = text.toLowerCase();
+  const isNegative = /\b(debited|sent|paid to|withdrawn|failed|declined|reversed|refund|otp|request)\b/i.test(text);
+  const isCredit = /\b(credited|received|deposited|cr|credit)\b/i.test(text) && /\b(upi|vpa|a\/c|account|acct|bank)\b/i.test(text);
+  const amountMatch = text.match(/(?:rs\.?|inr|₹)\s*([0-9,]+(?:\.[0-9]{1,2})?)/i) || text.match(/([0-9,]+(?:\.[0-9]{1,2})?)\s*(?:rs\.?|inr|₹)/i);
+  const referenceMatch = text.match(/\b(?:utr|upi ref|upi reference|rrn|ref(?:erence)?(?: no)?)[\s:.-]*([A-Z0-9]{6,})/i);
+  const amount = amountMatch ? Number(amountMatch[1].replaceAll(",", "")) : 0;
+
+  return {
+    isPaymentCredit: Boolean(isCredit && !isNegative && amount > 0),
+    amount,
+    paymentTime: "",
+    reference: referenceMatch ? referenceMatch[1] : "",
+    payer: "",
+    confidence: isCredit && !isNegative && amount > 0 ? 0.65 : 0.2,
+    reason: "Fallback parser result."
+  };
+}
+
+function normalizeParsedPayment(parsed, fallback) {
+  const amount = Number(parsed.amount || fallback.amount || 0);
+  return {
+    isPaymentCredit: Boolean(parsed.isPaymentCredit) && amount > 0,
+    amount,
+    paymentTime: String(parsed.paymentTime || ""),
+    reference: String(parsed.reference || ""),
+    payer: String(parsed.payer || ""),
+    confidence: Math.max(0, Math.min(1, Number(parsed.confidence || 0))),
+    reason: String(parsed.reason || fallback.reason || "")
+  };
+}
+
+async function matchIncomingPayment(parsedPayment, smsRecord) {
+  return matchIncomingPaymentRecord(parsedPayment, {
+    id: smsRecord.id,
+    source: "smsgate_gemini",
+    receivedAt: smsRecord.receivedAt,
+    notePrefix: "Payment SMS"
+  });
+}
+
+async function matchIncomingPaymentRecord(parsedPayment, sourceDetails) {
+  const orders = await readOrders();
+  const receivedAt = parseDate(sourceDetails.receivedAt);
+  const amount = Number(parsedPayment.amount || 0);
+  const candidates = orders.filter((order) => {
+    const status = order.paymentStatus || paymentStatuses.unpaid;
+    const mode = order.paymentMode || paymentModes.online;
+    const orderTime = parseDate(order.updatedAt || order.savedAt || order.createdAt);
+    return mode === paymentModes.online
+      && status === paymentStatuses.unpaid
+      && Number(order.total || 0).toFixed(2) === amount.toFixed(2)
+      && Math.abs(receivedAt.getTime() - orderTime.getTime()) <= paymentMatchWindowMs;
+  });
+
+  if (candidates.length === 1) {
+    const order = candidates[0];
+    await updateOrderPaymentStatus({
+      ...order,
+      paymentStatus: paymentStatuses.detected,
+      paymentDetectedAt: new Date().toISOString(),
+      paymentReference: parsedPayment.reference,
+      paymentSource: sourceDetails.source,
+      paymentMatchNote: `${sourceDetails.notePrefix} matched exact amount ${amount.toFixed(2)}.`,
+      paymentSmsId: sourceDetails.id
+    });
+    return { matchStatus: paymentStatuses.detected, receiptNumber: order.receiptNumber };
+  }
+
+  if (candidates.length > 1) {
+    for (const order of candidates) {
+      await updateOrderPaymentStatus({
+        ...order,
+        paymentStatus: paymentStatuses.review,
+        paymentDetectedAt: new Date().toISOString(),
+        paymentReference: parsedPayment.reference,
+        paymentSource: sourceDetails.source,
+        paymentMatchNote: `Multiple unpaid bills matched amount ${amount.toFixed(2)}. Confirm manually.`,
+        paymentSmsId: sourceDetails.id
+      });
+    }
+    return { matchStatus: paymentStatuses.review, receiptNumber: "" };
+  }
+
+  return { matchStatus: "no_match", receiptNumber: "" };
+}
+
+function isValidSmsGateWebhook(rawBody, req) {
+  const signingKey = String(process.env.SMSGATE_WEBHOOK_SIGNING_KEY || "").trim();
+  if (!signingKey) {
+    return true;
+  }
+
+  const signature = req.headers["x-signature"];
+  const timestamp = req.headers["x-timestamp"];
+  if (!signature || !timestamp) {
+    return false;
+  }
+
+  const expected = crypto
+    .createHmac("sha256", signingKey)
+    .update(`${rawBody}${timestamp}`)
+    .digest("hex");
+  const expectedBuffer = Buffer.from(expected);
+  const signatureBuffer = Buffer.from(String(signature));
+  return expectedBuffer.length === signatureBuffer.length && crypto.timingSafeEqual(expectedBuffer, signatureBuffer);
+}
+
+async function writeIncomingSmsRecord(record) {
+  const supabase = getSupabaseConfig();
+  if (supabase.ok) {
+    await supabaseRequest("/rest/v1/incoming_payment_sms", {
+      method: "POST",
+      headers: { "Prefer": "return=minimal" },
+      body: JSON.stringify(mapIncomingSmsToDb(record))
+    });
+    return;
+  }
+
+  const records = readIncomingSmsLocal();
+  const existingIndex = records.findIndex((entry) => entry.id === record.id);
+  if (existingIndex >= 0) {
+    records[existingIndex] = record;
+  } else {
+    records.unshift(record);
+  }
+  fs.mkdirSync(dataDir, { recursive: true });
+  fs.writeFileSync(incomingSmsPath, JSON.stringify(records.slice(0, 500), null, 2));
+}
+
+function readIncomingSmsLocal() {
+  if (!fs.existsSync(incomingSmsPath)) {
+    return [];
+  }
+
+  try {
+    const parsed = JSON.parse(stripBom(fs.readFileSync(incomingSmsPath, "utf8")));
+    return Array.isArray(parsed) ? parsed : [parsed];
+  } catch {
+    return [];
+  }
+}
+
+function mapIncomingSmsToDb(record) {
+  return {
+    id: record.id,
+    message_id: record.messageId,
+    sender: record.sender,
+    recipient: record.recipient,
+    received_at: record.receivedAt,
+    message: record.message,
+    parsed: record.parsed,
+    match_status: record.matchStatus,
+    matched_receipt_number: record.matchedReceiptNumber || null,
+    created_at: record.createdAt
+  };
+}
+
 function mapSalesOrderToDb(order) {
   const now = new Date().toISOString();
-  return {
+  const payload = {
     receipt_number: order.receiptNumber,
     business_name: order.businessName,
     business_phone: order.businessPhone,
@@ -823,8 +1780,17 @@ function mapSalesOrderToDb(order) {
     tax: order.tax,
     total: order.total,
     created_label: order.createdAt,
-    updated_at: now
+    updated_at: now,
+    payment_mode: order.paymentMode || paymentModes.online,
+    payment_status: order.paymentStatus || paymentStatuses.unpaid,
+    payment_detected_at: order.paymentDetectedAt || null,
+    payment_confirmed_at: order.paymentConfirmedAt || null,
+    payment_reference: order.paymentReference || null,
+    payment_source: order.paymentSource || null,
+    payment_match_note: order.paymentMatchNote || null,
+    payment_sms_id: order.paymentSmsId || null
   };
+  return payload;
 }
 
 function mapSalesOrderFromDb(row) {
@@ -842,7 +1808,15 @@ function mapSalesOrderFromDb(row) {
     total: Number(row.total || 0),
     createdAt: row.created_label || row.created_at,
     savedAt: row.created_at,
-    updatedAt: row.updated_at
+    updatedAt: row.updated_at,
+    paymentMode: row.payment_mode || paymentModes.online,
+    paymentStatus: row.payment_status || paymentStatuses.unpaid,
+    paymentDetectedAt: row.payment_detected_at || "",
+    paymentConfirmedAt: row.payment_confirmed_at || "",
+    paymentReference: row.payment_reference || "",
+    paymentSource: row.payment_source || "",
+    paymentMatchNote: row.payment_match_note || "",
+    paymentSmsId: row.payment_sms_id || ""
   };
 }
 
@@ -1134,6 +2108,21 @@ function serveStatic(urlPath, res) {
   });
 }
 
+function readRawBody(req) {
+  return new Promise((resolve, reject) => {
+    let data = "";
+    req.on("data", (chunk) => {
+      data += chunk;
+      if (data.length > 1_000_000) {
+        req.destroy();
+        reject(new Error("Request body too large"));
+      }
+    });
+    req.on("end", () => resolve(data));
+    req.on("error", reject);
+  });
+}
+
 function readJson(req) {
   return new Promise((resolve, reject) => {
     let data = "";
@@ -1158,6 +2147,11 @@ function readJson(req) {
 function sendJson(res, statusCode, payload) {
   res.writeHead(statusCode, { "Content-Type": "application/json; charset=utf-8" });
   res.end(JSON.stringify(payload));
+}
+
+function sendHtml(res, statusCode, html) {
+  res.writeHead(statusCode, { "Content-Type": "text/html; charset=utf-8" });
+  res.end(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Gmail</title></head><body>${html}</body></html>`);
 }
 
 function loadEnvFile() {

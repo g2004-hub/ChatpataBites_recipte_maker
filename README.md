@@ -37,6 +37,35 @@ The "Send bill to customer" button sends the customer a secure bill preview link
 
 After the bill SMS is sent successfully, the app queues a Google review SMS for 10 minutes later. With Supabase configured, the queue is stored in `scheduled_review_messages`; without Supabase, it is stored locally in `data/scheduled-review-messages.json`.
 
+## Payment SMS detection
+
+SMSGate can forward incoming SMS messages to:
+
+```text
+POST /api/smsgate/incoming
+```
+
+Set these environment variables before enabling the webhook:
+
+```env
+GEMINI_API_KEY=your-gemini-api-key
+SMSGATE_WEBHOOK_SIGNING_KEY=your-smsgate-webhook-signing-key
+```
+
+The app uses Gemini to extract payment amount/reference from bank or UPI credit SMS messages, then matches exact amounts against recent unpaid bills. It marks a single exact match as `Payment detected`; duplicate same-amount matches are marked `Needs review` for manual confirmation in the admin panel.
+
+Gmail payment detection can also read Slice/payment-alert emails after you connect Gmail from the admin panel. Set these environment variables on Railway for production:
+
+```env
+GOOGLE_CLIENT_ID=your-google-oauth-client-id
+GOOGLE_CLIENT_SECRET=your-google-oauth-client-secret
+GOOGLE_REDIRECT_URI=https://chatpatabites.up.railway.app/api/admin/gmail/callback
+PAYMENT_EMAIL_GMAIL_QUERY=newer_than:7d (slice OR credited OR received OR UPI)
+PAYMENT_EMAIL_ALLOWED_SENDERS=slice
+```
+
+For local development, the app can read the downloaded Google OAuth JSON from your Downloads folder, but Railway needs the environment variables.
+
 ## SMSGate setup
 
 The backend sends bill and review messages to:

@@ -94,6 +94,18 @@
         gap: 8px;
       }
 
+      .gmail-panel {
+        border-top: 1px solid var(--line);
+        border-bottom: 1px solid var(--line);
+        padding: 16px 0;
+        margin: 18px 0;
+      }
+
+      .gmail-panel p {
+        color: var(--muted);
+        margin: 8px 0 12px;
+      }
+
       @media (max-width: 760px) {
         .admin-login {
           display: grid;
@@ -131,6 +143,15 @@
 
         <div id="messageBox" class="message-box" role="status" aria-live="polite" hidden></div>
         <div id="summaryView" class="summary-grid"></div>
+
+        <section id="gmailPanel" class="gmail-panel" hidden>
+          <h2>Gmail Payment Detection</h2>
+          <p id="gmailStatus">Checking Gmail...</p>
+          <div class="form-actions">
+            <button id="connectGmail" type="button" class="secondary">Connect Gmail</button>
+            <button id="disconnectGmail" type="button" class="secondary" hidden>Disconnect Gmail</button>
+          </div>
+        </section>
 
         <form id="supplierForm" class="supplier-form" hidden>
           <h2 id="supplierFormTitle">Supplier Payment Record</h2>

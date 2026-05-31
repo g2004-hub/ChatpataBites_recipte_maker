@@ -10,6 +10,10 @@ const messageBox = document.querySelector("#messageBox");
 const supplierFormTitle = document.querySelector("#supplierFormTitle");
 const supplierSubmitButton = document.querySelector("#supplierSubmitButton");
 const cancelSupplierEditButton = document.querySelector("#cancelSupplierEdit");
+const gmailPanel = document.querySelector("#gmailPanel");
+const gmailStatus = document.querySelector("#gmailStatus");
+const connectGmailButton = document.querySelector("#connectGmail");
+const disconnectGmailButton = document.querySelector("#disconnectGmail");
 
 let editingSupplierId = "";
 let currentSupplierRecords = [];
@@ -32,6 +36,9 @@ cancelSupplierEditButton.addEventListener("click", () => {
   resetSupplierForm();
 });
 
+connectGmailButton.addEventListener("click", connectGmail);
+disconnectGmailButton.addEventListener("click", disconnectGmail);
+
 supplierView.addEventListener("click", (event) => {
   const editButton = event.target.closest("[data-edit-supplier]");
   if (!editButton) {
@@ -48,6 +55,7 @@ ordersView.addEventListener("click", async (event) => {
   const editButton = event.target.closest("[data-edit-order]");
   const cancelButton = event.target.closest("[data-cancel-order]");
   const saveButton = event.target.closest("[data-save-order]");
+  const paymentButton = event.target.closest("[data-payment-status]");
 
   if (editButton) {
     renderOrders(currentOrders, editButton.dataset.editOrder);
@@ -59,6 +67,10 @@ ordersView.addEventListener("click", async (event) => {
 
   if (saveButton) {
     await saveOrderRecord(saveButton.dataset.saveOrder);
+  }
+
+  if (paymentButton) {
+    await savePaymentStatus(paymentButton.dataset.receiptNumber, paymentButton.dataset.paymentStatus);
   }
 });
 
@@ -80,12 +92,59 @@ async function loadOverview() {
   }
 
   supplierForm.hidden = false;
+  gmailPanel.hidden = false;
   currentSupplierRecords = result.supplierRecords || [];
   currentOrders = result.orders || [];
   renderSummary(result.summary, result.storageMode);
   renderDaily(result.daily || []);
   renderSupplierRecords(currentSupplierRecords);
   renderOrders(currentOrders);
+  await loadGmailStatus();
+}
+
+async function loadGmailStatus() {
+  const response = await fetch(`/api/admin/gmail/status?password=${encodeURIComponent(adminPassword.value)}`);
+  const result = await response.json();
+  if (!response.ok) {
+    gmailStatus.textContent = result.error || "Could not check Gmail.";
+    return;
+  }
+
+  gmailStatus.textContent = result.connected
+    ? `Connected: ${result.email || "Gmail"} | Query: ${result.query}`
+    : "Gmail is not connected.";
+  connectGmailButton.hidden = result.connected;
+  disconnectGmailButton.hidden = !result.connected;
+}
+
+async function connectGmail() {
+  showMessage("", "");
+  const response = await fetch(`/api/admin/gmail/connect-url?password=${encodeURIComponent(adminPassword.value)}`);
+  const result = await response.json();
+  if (!response.ok) {
+    showMessage(result.error || "Could not start Gmail connection.", "error");
+    return;
+  }
+
+  window.open(result.authUrl, "_blank", "noopener");
+  showMessage("Gmail login opened. Complete it, then click View orders again.", "success");
+}
+
+async function disconnectGmail() {
+  showMessage("", "");
+  const response = await fetch("/api/admin/gmail/disconnect", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ adminPassword: adminPassword.value })
+  });
+  const result = await response.json();
+  if (!response.ok) {
+    showMessage(result.error || "Could not disconnect Gmail.", "error");
+    return;
+  }
+
+  showMessage("Gmail disconnected.", "success");
+  await loadGmailStatus();
 }
 
 async function saveSupplierRecord() {
@@ -145,6 +204,27 @@ async function saveOrderRecord(receiptNumber) {
   }
 
   showMessage("Sell record updated.", "success");
+  await loadOverview();
+}
+
+async function savePaymentStatus(receiptNumber, paymentStatus) {
+  showMessage("", "");
+  const response = await fetch(`/api/admin/payment-status/${encodeURIComponent(receiptNumber)}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      adminPassword: adminPassword.value,
+      paymentStatus
+    })
+  });
+  const result = await response.json();
+
+  if (!response.ok) {
+    showMessage(result.error || "Could not update payment status.", "error");
+    return;
+  }
+
+  showMessage("Payment status updated.", "success");
   await loadOverview();
 }
 
@@ -278,6 +358,7 @@ function renderOrders(orders, editingReceiptNumber = "") {
           <th>Customer</th>
           <th>Items</th>
           <th>Amounts</th>
+          <th>Payment</th>
           <th>Saved</th>
           <th>Action</th>
         </tr>
@@ -302,8 +383,12 @@ function renderReadonlyOrder(order) {
         </ul>
       </td>
       <td><strong>${money(order.total)}</strong><br><small>Discount: ${money(order.discount)} | Tax: ${money(order.tax)}</small></td>
+      <td>${renderPaymentStatus(order)}</td>
       <td>${escapeHtml(formatDate(order.updatedAt || order.savedAt || order.createdAt))}</td>
-      <td><button type="button" class="small-button secondary" data-edit-order="${escapeHtml(order.receiptNumber)}">Edit</button></td>
+      <td class="row-actions">
+        <button type="button" class="small-button secondary" data-edit-order="${escapeHtml(order.receiptNumber)}">Edit</button>
+        ${renderPaymentActions(order)}
+      </td>
     </tr>
   `;
 }
@@ -341,6 +426,7 @@ function renderEditableOrder(order) {
           </label>
         </div>
       </td>
+      <td>${renderPaymentStatus(order)}</td>
       <td>${escapeHtml(formatDate(order.updatedAt || order.savedAt || order.createdAt))}</td>
       <td class="row-actions">
         <button type="button" class="small-button" data-save-order="${escapeHtml(order.receiptNumber)}">Save</button>
@@ -348,6 +434,39 @@ function renderEditableOrder(order) {
       </td>
     </tr>
   `;
+}
+
+function renderPaymentStatus(order) {
+  const statusLabels = {
+    unpaid: "Unpaid",
+    cash_paid: "Cash paid",
+    payment_detected: "Payment detected",
+    needs_review: "Needs review",
+    paid_confirmed: "Paid confirmed"
+  };
+  const modeLabel = order.paymentMode === "cash" ? "Cash" : "Online";
+  const status = order.paymentStatus || "unpaid";
+  const details = [
+    `Mode: ${modeLabel}`,
+    order.paymentReference ? `Ref: ${order.paymentReference}` : "",
+    order.paymentMatchNote || "",
+    order.paymentDetectedAt ? `Detected: ${formatDate(order.paymentDetectedAt)}` : "",
+    order.paymentConfirmedAt ? `Confirmed: ${formatDate(order.paymentConfirmedAt)}` : ""
+  ].filter(Boolean);
+
+  return `
+    <strong>${escapeHtml(statusLabels[status] || status)}</strong>
+    ${details.length ? `<br><small>${escapeHtml(details.join(" | "))}</small>` : ""}
+  `;
+}
+
+function renderPaymentActions(order) {
+  const receiptNumber = escapeHtml(order.receiptNumber);
+  if ((order.paymentStatus || "unpaid") === "paid_confirmed") {
+    return `<button type="button" class="small-button secondary" data-receipt-number="${receiptNumber}" data-payment-status="unpaid">Mark unpaid</button>`;
+  }
+
+  return `<button type="button" class="small-button" data-receipt-number="${receiptNumber}" data-payment-status="paid_confirmed">Confirm paid</button>`;
 }
 
 function formatOrderItemsForEdit(items) {

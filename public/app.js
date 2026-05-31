@@ -35,6 +35,7 @@ const fields = {
   customerPhone: document.querySelector("#customerPhone"),
   receiptNumber: document.querySelector("#receiptNumber"),
   googleReviewLink: document.querySelector("#googleReviewLink"),
+  paymentMode: document.querySelector("#paymentMode"),
   discount: document.querySelector("#discount"),
   tax: document.querySelector("#tax")
 };
@@ -184,6 +185,7 @@ function getOrder() {
     customerPhone: fields.customerPhone.value.trim(),
     receiptNumber: fields.receiptNumber.value.trim(),
     googleReviewLink: fields.googleReviewLink.value.trim(),
+    paymentMode: fields.paymentMode.value,
     items,
     subtotal,
     discount,
@@ -223,12 +225,13 @@ function renderReceipt() {
     <div class="receipt-meta"><span>Receipt</span><strong>${escapeHtml(order.receiptNumber || "-")}</strong></div>
     <div class="receipt-meta"><span>Date</span><span>${escapeHtml(order.createdAt)}</span></div>
     <div class="receipt-meta"><span>Customer</span><span>${escapeHtml(order.customerName || "-")}</span></div>
+    <div class="receipt-meta"><span>Payment</span><span>${order.paymentMode === "cash" ? "Cash" : "Online UPI"}</span></div>
     <div class="receipt-items">${itemLines}</div>
     <div class="receipt-total-line"><span>Subtotal</span><span>${money(order.subtotal)}</span></div>
     <div class="receipt-total-line"><span>Discount</span><span>-${money(order.discount)}</span></div>
     <div class="receipt-total-line"><span>Tax</span><span>${money(order.tax)}</span></div>
     <div class="receipt-total-line final"><span>Total</span><span>${money(order.total)}</span></div>
-    <p class="receipt-note">Thank you for your order. For any queries kindly contact ${escapeHtml(order.businessPhone || "us")}.</p>
+    <p class="receipt-note">${order.paymentMode === "cash" ? "Cash payment selected. " : "Online UPI payment selected. "}Thank you for your order. For any queries kindly contact ${escapeHtml(order.businessPhone || "us")}.</p>
   `;
 }
 
@@ -337,7 +340,8 @@ function startNewOrder() {
   localStorage.removeItem("receipt-maker-draft");
   fields.customerName.value = "";
   fields.customerPhone.value = "";
-  fields.receiptNumber.value = createReceiptNumber();
+    fields.receiptNumber.value = createReceiptNumber();
+    fields.paymentMode.value = "cash";
   fields.discount.value = 0;
   fields.tax.value = 0;
   itemsList.innerHTML = "";
@@ -381,6 +385,7 @@ function loadDraft() {
     fields.customerPhone.value = draft.customerPhone || "";
     fields.receiptNumber.value = draft.receiptNumber || fields.receiptNumber.value;
     fields.googleReviewLink.value = draft.googleReviewLink || fields.googleReviewLink.value;
+    fields.paymentMode.value = draft.paymentMode || "cash";
     fields.discount.value = draft.discount || 0;
     fields.tax.value = draft.tax || 0;
     itemsList.innerHTML = "";
