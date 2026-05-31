@@ -33,7 +33,7 @@ For permanent Railway storage, create a Supabase project, run `supabase-schema.s
 
 ## Bill links and review SMS
 
-The "Send bill to customer" button sends the customer a secure bill preview link immediately. The bill page only shows that customer's bill and UPI payment options for `8260586748@ybl`.
+The "Send bill to customer" button sends the customer a secure bill preview link immediately. The bill page only shows that customer's bill and UPI payment options for `chatpatabites@slc`.
 
 After the bill SMS is sent successfully, the app queues a Google review SMS for 10 minutes later. With Supabase configured, the queue is stored in `scheduled_review_messages`; without Supabase, it is stored locally in `data/scheduled-review-messages.json`.
 
