@@ -5,21 +5,21 @@ const state = {
     "Egg chicken Roll",
     "Lachha Egg chicken Roll",
     "Chicken Biriyani",
-    "Crab Masala (1pcs)",
-    "Chicken Stick (1pcs)",
-    "Chicken Popcorn (1 plate)",
-    "Chicken Chop (1pcs)",
+    "Crab Masala",
+    "Chicken Stick",
+    "Chicken Popcorn",
+    "Chicken Chop",
     "Chicken Burger",
-    "Chicken Desi kasa (4pcs)",
+    "Chicken Desi kasa",
     "Chicken 65",
-    "Chicken Pakoda (6pcs)",
-    "Bread Omelette (double egg)",
+    "Chicken Pakoda",
+    "Bread Omelette",
     "Double Egg Omelette",
-    "Chicken Dumplings (6pcs)",
-    "Veg Dumplings (6pcs)",
-    "Paneer Dumplings (6pcs)",
-    "Spring Roll (2pcs)",
-    "Harabhara Kabab (4pcs)"
+    "Chicken Dumplings",
+    "Veg Dumplings",
+    "Paneer Dumplings",
+    "Spring Roll",
+    "Harabhara Kabab"
   ]
 };
 
