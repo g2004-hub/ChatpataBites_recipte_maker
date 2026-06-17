@@ -19,81 +19,104 @@
           </div>
 
           <form id="orderForm">
-            <div class="grid two">
-              <label>
-                Business name
-                <input id="businessName" name="businessName" type="text" required>
-              </label>
-              <label>
-                Business phone
-                <input id="businessPhone" name="businessPhone" type="tel">
-              </label>
-              <label>
-                Customer name
-                <input id="customerName" name="customerName" type="text" placeholder="Customer name" required>
-              </label>
-              <label>
-                Customer phone
-                <input id="customerPhone" name="customerPhone" type="tel" placeholder="+919876543210" required>
-              </label>
-              <label>
-                Receipt number
-                <input id="receiptNumber" name="receiptNumber" type="text" required>
-              </label>
-              <label>
-                Google review link
-                <input id="googleReviewLink" name="googleReviewLink" type="url" placeholder="https://g.page/r/.../review">
-              </label>
-            </div>
-
-            <div class="items-header">
-              <h2>Items</h2>
-              <button class="icon-button text-button" id="addItem" type="button" title="Add item">
-                <span aria-hidden="true">+</span>
-                Add item
-              </button>
-            </div>
-
-            <div class="items-table" role="table" aria-label="Order items">
-              <div class="items-row items-labels" role="row">
-                <span>Menu</span>
-                <span>Price</span>
-                <span>Qty</span>
-                <span>Total</span>
-                <span></span>
+            <section class="form-section">
+              <div class="form-section-title">
+                <span>1</span>
+                <h2>Customer</h2>
               </div>
-              <div id="itemsList"></div>
-            </div>
-
-            <div class="totals-box">
-              <label>
-                Payment
-                <select id="paymentMode" name="paymentMode">
-                  <option value="cash">Cash</option>
-                  <option value="online">Online UPI</option>
-                </select>
-              </label>
-              <label>
-                Discount
-                <input id="discount" name="discount" type="number" min="0" step="0.01" value="0">
-              </label>
-              <label>
-                Tax
-                <input id="tax" name="tax" type="number" min="0" step="0.01" value="0">
-              </label>
-              <div class="grand-total">
-                <span>Total</span>
-                <strong id="grandTotal">&#8377;0.00</strong>
+              <div class="grid two">
+                <label>
+                  Customer name
+                  <input id="customerName" name="customerName" type="text" placeholder="Customer name" required>
+                </label>
+                <label>
+                  Customer phone
+                  <input id="customerPhone" name="customerPhone" type="tel" placeholder="+919876543210" required>
+                </label>
+                <label>
+                  Receipt number
+                  <input id="receiptNumber" name="receiptNumber" type="text" required>
+                </label>
+                <label>
+                  Payment
+                  <select id="paymentMode" name="paymentMode">
+                    <option value="cash">Cash</option>
+                    <option value="online">Online UPI</option>
+                  </select>
+                </label>
               </div>
-            </div>
+            </section>
+
+            <section class="form-section">
+              <div class="items-header">
+                <div class="form-section-title">
+                  <span>2</span>
+                  <h2>Items</h2>
+                </div>
+                <button class="icon-button text-button" id="addItem" type="button" title="Add item">
+                  <span aria-hidden="true">+</span>
+                  Add item
+                </button>
+              </div>
+
+              <div class="items-table" role="table" aria-label="Order items">
+                <div class="items-row items-labels" role="row">
+                  <span>Menu</span>
+                  <span>Price</span>
+                  <span>Qty</span>
+                  <span>Total</span>
+                  <span></span>
+                </div>
+                <div id="itemsList"></div>
+              </div>
+            </section>
+
+            <section class="form-section payment-section">
+              <div class="form-section-title">
+                <span>3</span>
+                <h2>Payment</h2>
+              </div>
+              <div class="totals-box">
+                <label>
+                  Discount
+                  <input id="discount" name="discount" type="number" min="0" step="0.01" value="0">
+                </label>
+                <label>
+                  Tax
+                  <input id="tax" name="tax" type="number" min="0" step="0.01" value="0">
+                </label>
+                <div class="grand-total">
+                  <span>Total</span>
+                  <strong id="grandTotal">&#8377;0.00</strong>
+                </div>
+              </div>
+            </section>
+
+            <details class="settings-panel">
+              <summary>Shop and review setup</summary>
+              <div class="grid two">
+                <label>
+                  Business name
+                  <input id="businessName" name="businessName" type="text" required>
+                </label>
+                <label>
+                  Business phone
+                  <input id="businessPhone" name="businessPhone" type="tel">
+                </label>
+                <label class="wide-field">
+                  Google review link
+                  <input id="googleReviewLink" name="googleReviewLink" type="url" placeholder="https://g.page/r/.../review">
+                </label>
+              </div>
+            </details>
 
             <div id="messageBox" class="message-box" role="status" aria-live="polite" hidden></div>
 
             <div class="actions">
-              <button type="submit">Update receipt</button>
-              <button type="button" id="printReceipt" class="secondary">Print</button>
-              <button type="button" id="sendBill" class="secondary">Send bill to customer</button>
+              <button type="button" id="sendBill" class="send-button">Send bill to customer</button>
+              <button type="submit" class="secondary">Save only</button>
               <button type="button" id="shareBillWhatsApp" class="secondary">WhatsApp bill link</button>
+              <button type="button" id="printReceipt" class="secondary">Print</button>
               <button type="button" id="newOrder" class="secondary">New order</button>
             </div>
           </form>
