@@ -2,21 +2,24 @@ const state = {
   currencySymbol: "\u20B9",
   config: {},
   menu: [
-    "Lacha paratha egg roll",
-    "Plain egg roll",
-    "Omlette",
-    "Bread omlette",
-    "Chicken pakoda",
-    "Chicken stick",
+    "Egg chicken Roll",
+    "Lachha Egg chicken Roll",
+    "Chicken Biriyani",
+    "Crab Masala (1pcs)",
+    "Chicken Stick (1pcs)",
+    "Chicken Popcorn (1 plate)",
+    "Chicken Chop (1pcs)",
+    "Chicken Burger",
+    "Chicken Desi kasa (4pcs)",
     "Chicken 65",
-    "Chicken popcorn",
-    "Chicken Manchurian gravy",
-    "Chicken kasa desi style",
-    "Chicken berger",
-    "Egg chawmin",
-    "Our special chicken biryani",
-    "Bali prawn stick",
-    "Crab masala"
+    "Chicken Pakoda (6pcs)",
+    "Bread Omelette (double egg)",
+    "Double Egg Omelette",
+    "Chicken Dumplings (6pcs)",
+    "Veg Dumplings (6pcs)",
+    "Paneer Dumplings (6pcs)",
+    "Spring Roll (2pcs)",
+    "Harabhara Kabab (4pcs)"
   ]
 };
 
